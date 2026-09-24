@@ -1,7 +1,6 @@
 workflows:
   android-workflow:
     name: Android Workflow
-    instance_type: linux
     environment:
       flutter: stable
     scripts:
