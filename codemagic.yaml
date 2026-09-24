@@ -1,12 +1,13 @@
 workflows:
   android-workflow:
     name: Android Workflow
+    instance_type: linux
     environment:
       flutter: stable
     scripts:
       - name: Get dependencies
         script: flutter packages get
-      - name: Build App Bundle for Play Store
+      - name: Build App Bundle
         script: flutter build appbundle --release
     artifacts:
       - build/app/outputs/bundle/release/app-release.aab
