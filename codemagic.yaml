@@ -1,12 +1,55 @@
 workflows:
-  android-workflow:
-    name: Android Workflow
+  react-capacitor-android:
+    name: B&T Formula1 - Android APK
+    max_build_duration: 60
     environment:
-      flutter: stable
+      node: 22.0.0
+      java: 17
     scripts:
-      - name: Get dependencies
-        script: flutter packages get
-      - name: Build App Bundle
-        script: flutter build appbundle --release
+      - name: Installa dipendenze npm
+        script: |
+          npm ci
+
+      - name: Build React App
+        script: |
+          export CI=false
+          export GENERATE_SOURCEMAP=false
+          export NODE_OPTIONS="--max-old-space-size=4096"
+          npm run build
+
+      - name: Setup Capacitor Android
+        script: |
+          npx cap add android 2>/dev/null || true
+          npx cap sync android
+
+      - name: Inietta AdMob App ID
+        script: |
+          MANIFEST="android/app/src/main/AndroidManifest.xml"
+          if ! grep -q "APPLICATION_ID" "$MANIFEST"; then
+            sed -i 's|</application>|    <meta-data android:name="com.google.android.gms.ads.APPLICATION_ID" android:value="ca-app-pub-5787516371588469~8054706643"/>\n    </application>|' "$MANIFEST"
+          fi
+
+      - name: Aggiungi AdMob SDK
+        script: |
+          GRADLE="android/app/build.gradle"
+          if ! grep -q "play-services-ads" "$GRADLE"; then
+            sed -i "/dependencies {/a\\    implementation 'com.google.android.gms:play-services-ads:23.0.0'" "$GRADLE"
+          fi
+
+      - name: Compila APK
+        script: |
+          chmod +x android/gradlew
+          cd android
+          ./gradlew assembleDebug --no-daemon \
+            -Dorg.gradle.jvmargs="-Xmx4g"
+
     artifacts:
-      - build/app/outputs/bundle/release/app-release.aab
+      - android/app/build/outputs/apk/debug/app-debug.apk
+
+    publishing:
+      email:
+        recipients:
+          - formulaunobyedoardoandfabio@gmail.com
+        notify:
+          success: true
+          failure: true
