@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { Home, MessageSquare, Trophy, Activity, User, Shield, Bell, LogOut, Trash2, Eye, Lock, Play, Plus, X, Gift, ArrowLeft, Save, Radio, Mail, KeyRound, Pause, Volume2, BellRing, Send, ChevronDown, ChevronUp } from "lucide-react";
+import { Home, MessageSquare, Trophy, Activity, User, Shield, Bell, LogOut, Trash2, Eye, Lock, Play, Plus, X, Gift, ArrowLeft, Save, Radio, Mail, KeyRound, Pause, Volume2, BellRing, Send, ChevronDown, ChevronUp, ImagePlus, Sparkles } from "lucide-react";
 
 // ════════════════════════════════════════════════════════
 // ✅ FIREBASE CONFIGURATO — bt-app-50703
@@ -95,6 +95,42 @@ async function getDb() {
     console.error("Firebase init error:", e);
     return null;
   }
+}
+
+// ── STORAGE (upload immagini dall'Admin) ──
+let _storage = null;
+async function getStorage() {
+  if (!USE_FIREBASE) return null;
+  if (_storage) return _storage;
+  try {
+    if (!window._firebaseLoaded) {
+      await Promise.all([
+        loadScript("https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"),
+        loadScript("https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"),
+      ]);
+      window._firebaseLoaded = true;
+    }
+    if (!window._firebaseStorageLoaded) {
+      await loadScript("https://www.gstatic.com/firebasejs/10.12.0/firebase-storage-compat.js");
+      window._firebaseStorageLoaded = true;
+    }
+    if (!window.firebase.apps.length) {
+      window.firebase.initializeApp(FIREBASE_CONFIG);
+    }
+    _storage = window.firebase.storage();
+    return _storage;
+  } catch (e) {
+    console.error("Firebase Storage init error:", e);
+    return null;
+  }
+}
+async function uploadImage(file) {
+  const storage = await getStorage();
+  if (!storage) throw new Error("Storage non disponibile");
+  const path = `news/${Date.now()}-${file.name.replace(/[^a-zA-Z0-9.\-]/g,"_")}`;
+  const ref = storage.ref().child(path);
+  await ref.put(file);
+  return await ref.getDownloadURL();
 }
 
 function loadScript(src) {
@@ -301,7 +337,7 @@ const NotifCenter=({notifs,onClose,onMarkRead})=>{
   );
 };
 const Nav=({p,set,adOffset=0})=>{
-  const T=[{id:"home",l:"HOME",i:<Home size={20}/>},{id:"instagram",l:"INSTAGRAM",i:<span style={{fontSize:19}}>📷</span>},{id:"chat",l:"CHAT",i:<MessageSquare size={20}/>},{id:"fanta",l:"FANTA",i:<Trophy size={20}/>},{id:"live",l:"LIVE",i:<Activity size={20}/>}];
+  const T=[{id:"home",l:"HOME",i:<Home size={20}/>},{id:"instagram",l:"INSTAGRAM",i:<span style={{fontSize:19}}>📷</span>},{id:"chat",l:"CHAT",i:<MessageSquare size={20}/>},{id:"fanta",l:"FANTA",i:<Trophy size={20}/>},{id:"live",l:"RACE",i:<Activity size={20}/>}];
   // adOffset: quando il banner AdMob nativo è attivo, la Nav si sposta su di quell'altezza
   // così il banner (ancorato in basso da Android) non copre più i pulsanti delle schede.
   return <div style={{display:"flex",position:"fixed",bottom:`calc(${adOffset}px + var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px)))`,left:0,right:0,maxWidth:430,margin:"0 auto",background:A.bg,borderTop:`1px solid ${A.border}`,zIndex:50}}>{T.map(t=><button key={t.id} onClick={()=>set(t.id)} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:3,border:"none",background:"transparent",cursor:"pointer",padding:"8px 0",color:p===t.id?A.red:A.dim}}>{t.i}<span style={{fontSize:9,fontWeight:700}}>{t.l}</span></button>)}</div>;
@@ -889,6 +925,7 @@ const useAdMob = () => {
 const AdMobBanner = ({ isPremium, position = "bottom", compact = false }) => {
   const [visible, setVisible] = useState(true);
   const [adLoaded, setAdLoaded] = useState(false);
+  const [nativeAdFailed, setNativeAdFailed] = useState(false);
   const isNative = useAdMob();
 
   useEffect(() => {
@@ -906,8 +943,11 @@ const AdMobBanner = ({ isPremium, position = "bottom", compact = false }) => {
       (async () => {
         try {
           const { AdMob, BannerAdSize, BannerAdPosition } = { AdMob: window.Capacitor?.Plugins?.AdMob };
-          if (!AdMob) { setAdLoaded(true); return; }
+          if (!AdMob) { setAdLoaded(true); setNativeAdFailed(true); return; }
           await AdMob.initialize({ requestTrackingAuthorization: true });
+          // Se Google non ha un annuncio da mostrare (no-fill) il plugin lo segnala
+          // qui in modo asincrono — senza questo listener resterebbe uno spazio vuoto.
+          AdMob.addListener?.("bannerAdFailedToLoad", () => setNativeAdFailed(true));
           await AdMob.showBanner({
             adId: ADMOB_BANNER_ID,
             adSize: compact ? "SMART_BANNER" : "BANNER",
@@ -916,12 +956,13 @@ const AdMobBanner = ({ isPremium, position = "bottom", compact = false }) => {
             isTesting: false,
           });
           setAdLoaded(true);
-        } catch(e) { setAdLoaded(true); }
+        } catch(e) { setAdLoaded(true); setNativeAdFailed(true); }
       })();
       // Cleanup: se il componente si smonta (es. cambio pagina) rimuovi il banner nativo,
       // altrimenti resterebbe visibile sopra le altre schede e bloccherebbe i tap sulla Nav.
       return () => {
         const { AdMob } = { AdMob: window.Capacitor?.Plugins?.AdMob };
+        AdMob?.removeAllListeners?.().catch(() => {});
         AdMob?.removeBanner?.().catch(() => {});
       };
     }
@@ -932,8 +973,10 @@ const AdMobBanner = ({ isPremium, position = "bottom", compact = false }) => {
 
   if (isPremium || !visible) return null;
 
-  // Su APK nativo, il banner è gestito nativamente — nascondi il div web
-  if (isNative) return <div style={{ height: compact ? 44 : 60 }}/>;
+  // Su APK nativo, il banner è gestito nativamente — nascondi il div web,
+  // a meno che Google non abbia nessun annuncio da mostrare: in quel caso
+  // meglio il banner sponsor qui sotto che uno spazio vuoto.
+  if (isNative && !nativeAdFailed) return <div style={{ height: compact ? 44 : 60 }}/>;
 
   const h = compact ? 44 : 60;
   return (
@@ -1485,6 +1528,10 @@ const AdminNotifications=({notifs,setNotifs})=>{
 const AdminPanel=({news,setNews,fanta,setFanta,piloti,setPiloti,costruttori,setCostruttori,races,setRaces,ig,setIg,notifs,setNotifs,onClose})=>{
   const [tab,setTab]=useState("NEWS");
   const [f,setF]=useState({title:"",summary:"",category:"NEWS",author:"Team B&T",image:"",content:"",published:true});
+  const [imgUploading,setImgUploading]=useState(false);const [imgErr,setImgErr]=useState("");
+  const onPickImage=async e=>{const file=e.target.files?.[0];e.target.value="";if(!file)return;setImgErr("");setImgUploading(true);try{const url=await uploadImage(file);setF(p=>({...p,image:url}));}catch(err){console.error("uploadImage error:",err);setImgErr("Upload non riuscito, riprova");}setImgUploading(false);};
+  const [genLoading,setGenLoading]=useState(false);const [genErr,setGenErr]=useState("");
+  const genArticle=async()=>{if(!f.title){setGenErr("Scrivi prima un titolo");return;}setGenErr("");setGenLoading(true);try{const r=await fetch(`${FUNCTIONS_BASE}/generateArticle`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({title:f.title,summary:f.summary,category:f.category})});const d=await r.json();if(!r.ok)throw new Error(d.error||"Errore ChatGPT");setF(p=>({...p,content:d.content}));}catch(err){console.error("genArticle error:",err);setGenErr("ChatGPT non ha risposto, riprova");}setGenLoading(false);};
   const saveN=async u=>{setNews(u);await ss("bt-news",u);};const addN=async()=>{if(!f.title)return;await saveN([{...f,id:uid(),date:new Date().toISOString()},...news]);setF({title:"",summary:"",category:"NEWS",author:"Team B&T",image:"",content:"",published:true});};
   const [nff,setNff]=useState({name:"",team:""});const saveF=async u=>{setFanta(u);await ss("bt-fanta-pilots",u);};const addF=async()=>{if(!nff.name)return;await saveF([...fanta,{...nff,id:uid(),price:10,points:0}]);setNff({name:"",team:""});};
   const [pT,setPT]=useState("PILOTI");const pD=pT==="PILOTI"?piloti:costruttori;const setPD=pT==="PILOTI"?setPiloti:setCostruttori;const pK=pT==="PILOTI"?"bt-piloti":"bt-costruttori";
@@ -1501,7 +1548,7 @@ const AdminPanel=({news,setNews,fanta,setFanta,piloti,setPiloti,costruttori,setC
       </div>
     </div>
     <div style={{padding:"0 16px 80px"}}>
-      {tab==="NEWS"&&<div><div style={{color:A.red,fontWeight:900,fontStyle:"italic",fontSize:13,margin:"16px 0 12px"}}>NUOVO ARTICOLO</div><div style={{background:A.card,borderRadius:14,padding:14,marginBottom:16,display:"flex",flexDirection:"column",gap:9}}><Inp ph="Titolo" val={f.title} chg={e=>setF(p=>({...p,title:e.target.value}))}/><Inp ph="Sottotitolo" val={f.summary} chg={e=>setF(p=>({...p,summary:e.target.value}))}/><div style={{display:"flex",gap:8}}><select value={f.category} onChange={e=>setF(p=>({...p,category:e.target.value}))} style={{flex:1,background:A.card,border:`1px solid ${A.border}`,borderRadius:10,padding:"11px 13px",color:A.text,fontSize:13,outline:"none"}}>{cats.map(c=><option key={c}>{c}</option>)}</select><Inp ph="Autore" val={f.author} chg={e=>setF(p=>({...p,author:e.target.value}))} s={{flex:1}}/></div><Inp ph="URL immagine" val={f.image} chg={e=>setF(p=>({...p,image:e.target.value}))}/><Inp ph="Contenuto" val={f.content} chg={e=>setF(p=>({...p,content:e.target.value}))} rows={4}/><div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}><span style={{fontSize:13,color:A.text,fontWeight:700}}>PUBBLICATO</span><Tg v={f.published} chg={v=>setF(p=>({...p,published:v}))}/></div><Btn ch="PUBBLICA" onClick={addN}/></div>{news.map(n=><div key={n.id} style={{background:A.card,borderRadius:12,padding:"12px 14px",marginBottom:8,display:"flex",alignItems:"flex-start",justifyContent:"space-between"}}><div style={{flex:1}}><Tag ch={n.category} s={{fontSize:9,marginRight:8}}/><span style={{fontSize:13,color:n.published?A.text:A.muted,fontWeight:600}}>{n.title}</span>{!n.published&&<span style={{fontSize:10,color:A.dim}}> (bozza)</span>}<div style={{fontSize:11,color:A.dim,marginTop:3}}>{fmt(n.date)}</div></div><button onClick={()=>saveN(news.filter(x=>x.id!==n.id))} style={{background:"none",border:"none",cursor:"pointer",paddingLeft:8}}><Trash2 size={16} color={A.dim}/></button></div>)}</div>}
+      {tab==="NEWS"&&<div><div style={{color:A.red,fontWeight:900,fontStyle:"italic",fontSize:13,margin:"16px 0 12px"}}>NUOVO ARTICOLO</div><div style={{background:A.card,borderRadius:14,padding:14,marginBottom:16,display:"flex",flexDirection:"column",gap:9}}><Inp ph="Titolo" val={f.title} chg={e=>setF(p=>({...p,title:e.target.value}))}/><Inp ph="Sottotitolo" val={f.summary} chg={e=>setF(p=>({...p,summary:e.target.value}))}/><div style={{display:"flex",gap:8}}><select value={f.category} onChange={e=>setF(p=>({...p,category:e.target.value}))} style={{flex:1,background:A.card,border:`1px solid ${A.border}`,borderRadius:10,padding:"11px 13px",color:A.text,fontSize:13,outline:"none"}}>{cats.map(c=><option key={c}>{c}</option>)}</select><Inp ph="Autore" val={f.author} chg={e=>setF(p=>({...p,author:e.target.value}))} s={{flex:1}}/></div><div style={{display:"flex",flexDirection:"column",gap:6}}><div style={{display:"flex",gap:8}}><input type="file" accept="image/*" id="news-img-input" onChange={onPickImage} style={{display:"none"}}/><label htmlFor="news-img-input" style={{flex:1,background:A.card2,border:`1px solid ${A.border}`,borderRadius:10,padding:"11px 13px",color:A.text,fontSize:13,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",gap:8}}><ImagePlus size={15}/> {imgUploading?"Caricamento…":f.image?"Immagine caricata ✓":"Allega immagine"}</label><button onClick={genArticle} disabled={genLoading} style={{background:A.card2,border:`1px solid ${A.border}`,borderRadius:10,padding:"11px 14px",color:A.text,fontSize:13,cursor:genLoading?"default":"pointer",display:"flex",alignItems:"center",gap:6,opacity:genLoading?.6:1,whiteSpace:"nowrap"}}><Sparkles size={15}/> {genLoading?"Scrivo…":"ChatGPT"}</button></div>{f.image&&<img src={f.image} alt="" style={{width:"100%",height:90,objectFit:"cover",borderRadius:8}}/>}{(imgErr||genErr)&&<div style={{color:A.red,fontSize:11}}>{imgErr||genErr}</div>}</div><Inp ph="Contenuto" val={f.content} chg={e=>setF(p=>({...p,content:e.target.value}))} rows={4}/><div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}><span style={{fontSize:13,color:A.text,fontWeight:700}}>PUBBLICATO</span><Tg v={f.published} chg={v=>setF(p=>({...p,published:v}))}/></div><Btn ch="PUBBLICA" onClick={addN}/></div>{news.map(n=><div key={n.id} style={{background:A.card,borderRadius:12,padding:"12px 14px",marginBottom:8,display:"flex",alignItems:"flex-start",justifyContent:"space-between"}}><div style={{flex:1}}><Tag ch={n.category} s={{fontSize:9,marginRight:8}}/><span style={{fontSize:13,color:n.published?A.text:A.muted,fontWeight:600}}>{n.title}</span>{!n.published&&<span style={{fontSize:10,color:A.dim}}> (bozza)</span>}<div style={{fontSize:11,color:A.dim,marginTop:3}}>{fmt(n.date)}</div></div><button onClick={()=>saveN(news.filter(x=>x.id!==n.id))} style={{background:"none",border:"none",cursor:"pointer",paddingLeft:8}}><Trash2 size={16} color={A.dim}/></button></div>)}</div>}
       {tab==="FANTA F1"&&<div><div style={{color:A.red,fontWeight:900,fontStyle:"italic",fontSize:13,margin:"16px 0 12px"}}>PILOTI — PREZZI (M) E PUNTI</div><div style={{background:A.card,borderRadius:14,padding:12,marginBottom:14,display:"flex",gap:8}}><Inp ph="Nome" val={nff.name} chg={e=>setNff(p=>({...p,name:e.target.value}))} s={{flex:1}}/><Inp ph="Team" val={nff.team} chg={e=>setNff(p=>({...p,team:e.target.value}))} s={{flex:1}}/><button onClick={addF} style={{background:A.red,border:"none",borderRadius:10,padding:"0 14px",color:"#fff",fontWeight:800,fontSize:12,cursor:"pointer"}}>AGGIUNGI</button></div>{fanta.map(p=><div key={p.id} style={{background:A.card,borderRadius:12,padding:"12px 14px",marginBottom:8}}><div style={{marginBottom:8}}><span style={{fontWeight:700,fontSize:13,color:A.text}}>{p.name}</span><span style={{fontSize:11,color:A.muted,marginLeft:8}}>{p.team}</span></div><div style={{display:"flex",gap:7,alignItems:"center"}}><input type="number" step=".1" value={p.price} onChange={e=>setFanta(ps=>ps.map(x=>x.id===p.id?{...x,price:parseFloat(e.target.value)}:x))} style={{flex:1,background:A.card2,border:`1px solid ${A.border}`,borderRadius:8,padding:"8px",color:A.text,fontSize:13,outline:"none"}}/><input type="number" value={p.points} onChange={e=>setFanta(ps=>ps.map(x=>x.id===p.id?{...x,points:parseInt(e.target.value)}:x))} style={{flex:1,background:A.card2,border:`1px solid ${A.border}`,borderRadius:8,padding:"8px",color:A.text,fontSize:13,outline:"none"}}/><button onClick={async()=>await saveF(fanta)} style={{background:A.red,border:"none",borderRadius:8,padding:"8px 12px",color:"#fff",fontWeight:800,fontSize:12,cursor:"pointer"}}>SALVA</button><button onClick={()=>saveF(fanta.filter(x=>x.id!==p.id))} style={{background:"none",border:"none",cursor:"pointer"}}><Trash2 size={16} color={A.dim}/></button></div></div>)}</div>}
       {tab==="CLASSIFICHE"&&<div><div style={{display:"flex",gap:8,margin:"16px 0 14px"}}>{["PILOTI","COSTRUTTORI"].map(t=><button key={t} onClick={()=>setPT(t)} style={{background:t===pT?A.red:A.card,color:t===pT?"#fff":A.muted,border:"none",borderRadius:20,padding:"7px 16px",fontSize:11,fontWeight:800,cursor:"pointer"}}>{t}</button>)}</div><div style={{background:A.card,borderRadius:14,padding:12,marginBottom:14,display:"flex",gap:8,flexWrap:"wrap"}}><Inp ph="Nome" val={pf.name} chg={e=>setPf(p=>({...p,name:e.target.value}))} s={{flex:1,minWidth:120}}/>{pT==="PILOTI"&&<Inp ph="Team" val={pf.team} chg={e=>setPf(p=>({...p,team:e.target.value}))} s={{flex:1,minWidth:100}}/>}<button onClick={addPD} style={{background:A.red,border:"none",borderRadius:10,padding:"0 14px",color:"#fff",fontWeight:800,fontSize:12,cursor:"pointer"}}>AGGIUNGI</button></div>{pD.map(it=><div key={it.id} style={{background:A.card,borderRadius:12,padding:"12px 14px",marginBottom:8}}><div style={{marginBottom:8}}><span style={{fontWeight:700,fontSize:13,color:A.text}}>{it.name}</span>{it.team&&<span style={{fontSize:11,color:A.muted,marginLeft:8}}>{it.team}</span>}</div><div style={{display:"flex",gap:7,alignItems:"center"}}><input type="number" value={it.position} onChange={e=>setPD(d=>d.map(x=>x.id===it.id?{...x,position:parseInt(e.target.value)}:x))} style={{width:54,background:A.card2,border:`1px solid ${A.border}`,borderRadius:8,padding:"8px",color:A.text,fontSize:13,outline:"none",textAlign:"center"}}/><input type="number" value={it.points} onChange={e=>setPD(d=>d.map(x=>x.id===it.id?{...x,points:parseInt(e.target.value)}:x))} style={{flex:1,background:A.card2,border:`1px solid ${A.border}`,borderRadius:8,padding:"8px",color:A.text,fontSize:13,outline:"none"}}/><button onClick={async()=>await savePD(pD)} style={{background:A.red,border:"none",borderRadius:8,padding:"8px 12px",color:"#fff",fontWeight:800,fontSize:12,cursor:"pointer"}}>SALVA</button><button onClick={()=>savePD(pD.filter(x=>x.id!==it.id))} style={{background:"none",border:"none",cursor:"pointer"}}><Trash2 size={16} color={A.dim}/></button></div></div>)}</div>}
       {tab==="GARA LIVE"&&<div><div style={{color:A.red,fontWeight:900,fontStyle:"italic",fontSize:13,margin:"16px 0 12px"}}>GARE</div><div style={{background:A.card,borderRadius:14,padding:13,marginBottom:14,display:"flex",flexDirection:"column",gap:8}}><div style={{display:"flex",gap:8}}><Inp ph="Nome GP" val={gf.name} chg={e=>setGf(p=>({...p,name:e.target.value}))} s={{flex:1}}/><Inp ph="Circuito" val={gf.circuit} chg={e=>setGf(p=>({...p,circuit:e.target.value}))} s={{flex:1}}/></div><div style={{display:"flex",gap:8}}><Inp ph="Paese" val={gf.country} chg={e=>setGf(p=>({...p,country:e.target.value}))} s={{flex:1}}/><Inp ph="Round #" val={gf.round} chg={e=>setGf(p=>({...p,round:e.target.value}))} s={{flex:1}}/></div><input type="datetime-local" value={gf.date} onChange={e=>setGf(p=>({...p,date:e.target.value}))} style={{background:A.card,border:`1px solid ${A.border}`,borderRadius:10,padding:"11px 13px",color:A.text,fontSize:13,outline:"none",width:"100%"}}/><Btn ch="AGGIUNGI GARA" onClick={addR}/></div>{races.map(r=><div key={r.id} style={{background:A.card,borderRadius:12,padding:"13px 16px",marginBottom:10,display:"flex",alignItems:"center",justifyContent:"space-between"}}><div><div style={{fontWeight:700,fontSize:14,color:A.text}}>{r.name}</div><div style={{fontSize:11,color:A.muted}}>{r.circuit} · {r.date?new Date(r.date).toLocaleString("it-IT"):"-"}</div></div><div style={{display:"flex",gap:8,alignItems:"center"}}><select value={r.status} onChange={e=>saveR(races.map(x=>x.id===r.id?{...x,status:e.target.value}:x))} style={{background:r.status==="LIVE"?A.red:A.card2,border:`1px solid ${A.border}`,borderRadius:8,padding:"6px 10px",color:"#fff",fontSize:11,fontWeight:700,outline:"none",cursor:"pointer"}}>{["IN ARRIVO","LIVE","CONCLUSA"].map(s=><option key={s} style={{background:A.card,color:A.text}}>{s}</option>)}</select><button onClick={()=>saveR(races.filter(x=>x.id!==r.id))} style={{background:"none",border:"none",cursor:"pointer"}}><Trash2 size={16} color={A.dim}/></button></div></div>)}</div>}
@@ -1533,7 +1580,7 @@ export default function BTApp(){
   const [costr,setCostr]=useState(D_COSTR);const [fanta,setFanta]=useState(D_FANTA);
   const [races,setRaces]=useState(D_RACES);const [ig,setIg]=useState(D_IG);
 
-  useEffect(()=>{(async()=>{try{const sess=await dbGet("sessions","current");if(sess){const u=await dbGet("users",sess.email);if(u)setUser(u);}const shared=[["bt-news",setNews],["bt-piloti",setPiloti],["bt-costruttori",setCostr],["bt-fanta-pilots",setFanta],["bt-races",setRaces],["bt-ig-config",setIg]];await Promise.all(shared.map(async([k,s])=>{const d=await sg(k,true);if(d)s(d);}));}catch{}setLoading(false);})();},[]);
+  useEffect(()=>{(async()=>{try{const sess=await dbGet("sessions","current");if(sess){const u=await dbGet("users",sess.email);if(u)setUser(u);}const shared=[["bt-news",setNews],["bt-piloti",setPiloti],["bt-costruttori",setCostr],["bt-fanta-pilots",setFanta],["bt-races",setRaces],["bt-ig-config",setIg],["bt-notifs",setNotifs]];await Promise.all(shared.map(async([k,s])=>{const d=await sg(k,true);if(d)s(d);}));}catch{}setLoading(false);})();},[]);
 
   const doLogin=u=>{setUser(u);setAuth(false);};
   const doLogout=async()=>{await dbDelete("sessions","current");setUser(null);setPrem(false);setUnl(new Set());};

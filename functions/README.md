@@ -107,3 +107,31 @@ secondi (l'app controlla automaticamente). Finché non completi questi
 passaggi, il bottone "ABBONATI" mostrerà un errore invece di attivare un
 Premium finto — è voluto: meglio un errore onesto che un Premium che non hai
 davvero pagato (o, peggio, che nessuno paga).
+
+## 8. Assistente ChatGPT nel pannello Admin (facoltativo)
+
+Il bottone "Genera con ChatGPT" nel form NEWS dell'Admin passa dalla funzione
+`generateArticle`, che usa una chiave OpenAI. Stessa regola di Stripe: la
+chiave vive solo come secret sul server, mai nel codice.
+
+1. Vai su [platform.openai.com/api-keys](https://platform.openai.com/api-keys)
+   e crea una nuova chiave (**Create new secret key**).
+
+   ⚠️ Se avevi già condiviso una chiave OpenAI in chat o altrove, quella va
+   considerata compromessa: eliminala da quella pagina (**Revoke**) e usa
+   solo una chiave nuova, che non hai mai scritto da nessuna parte
+   pubblica — chiunque la trovasse potrebbe spendere soldi tuoi.
+2. Imposta il secret (dalla cartella principale del progetto):
+   ```bash
+   firebase functions:secrets:set OPENAI_API_KEY
+   # incolla qui la nuova chiave (sk-...)
+   ```
+3. Pubblica di nuovo le funzioni:
+   ```bash
+   firebase deploy --only functions
+   ```
+
+Da questo momento il bottone "Genera con ChatGPT" nel pannello Admin
+funziona. Ogni testo generato consuma credito sul tuo account OpenAI (pochi
+centesimi per articolo con il modello usato), quindi conviene tenere
+d'occhio i consumi su platform.openai.com/usage.
