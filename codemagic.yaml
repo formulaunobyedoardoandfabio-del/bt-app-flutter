@@ -36,7 +36,10 @@ workflows:
   apk-test:
     name: B&T - APK di prova
     max_build_duration: 60
-    environment: *env
+    environment:
+      <<: *env
+      groups:
+        - bt_secrets
     # Build automatica a ogni push su main (una volta collegato il webhook
     # su GitHub — vedi README.md), così non serve più premere "Start new
     # build" a mano dopo ogni correzione.
@@ -70,6 +73,8 @@ workflows:
       <<: *env
       android_signing:
         - bt_keystore
+      groups:
+        - bt_secrets
     scripts:
       - *install
       - *inject_secrets

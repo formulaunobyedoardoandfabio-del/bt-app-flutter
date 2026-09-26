@@ -130,7 +130,8 @@ terminale):**
    **Settings → Environment variables**.
 2. Aggiungi una variabile: nome `OPENAI_API_KEY`, valore la tua chiave
    (da [platform.openai.com/api-keys](https://platform.openai.com/api-keys)),
-   gruppo a piacere (o nessuno). Spunta **"Secure"** così non compare mai
+   gruppo **`bt_secrets`** (esatto così, deve corrispondere a quello
+   usato in `codemagic.yaml`). Spunta **"Secure"** così non compare mai
    nei log della build.
 3. Salva e avvia una nuova build ("B&T - APK di prova"): lo script
    "Inserisci chiavi" in `codemagic.yaml` la inietta automaticamente al
