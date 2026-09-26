@@ -41,8 +41,9 @@ const EMAILJS = {
 // Premium: 2,99€/mese — gestito su Firebase + Stripe (o Play Billing)
 // ── ID ADMOB REALI ──
 const ADMOB_APP_ID     = "ca-app-pub-5787516371588469~8054706643";
-const ADMOB_BANNER_ID  = "ca-app-pub-5787516371588469/2997561321";
+const ADMOB_BANNER_ID  = "ca-app-pub-5787516371588469/9706030785"; // banner nella Home, tra le news
 const ADMOB_REWARD_ID  = "ca-app-pub-5787516371588469/6784763097";
+const ADMOB_ADAPTIVE_BANNER_ID = "ca-app-pub-5787516371588469/9774488555"; // banner adattivo, in fondo alla classifica
 // Altezza riservata per il banner AdMob nativo (standard BANNER = 50dp + margine di sicurezza).
 // Serve per spostare su la Nav in basso e non far coprire i tab dal banner nativo.
 const AD_BANNER_H = 60;
@@ -846,6 +847,7 @@ const LivePage=({races,piloti,costruttori,isPremium,unlocked,onAd,user,onAuth,on
           </div>
         ))}
       </div>
+      <AdMobBanner isPremium={isPremium} adId={ADMOB_ADAPTIVE_BANNER_ID} adSize="ADAPTIVE_BANNER"/>
     </div>
   );
 };
@@ -935,7 +937,7 @@ const useAdMob = () => {
   return isCapacitor;
 };
 
-const AdMobBanner = ({ isPremium, position = "bottom", compact = false }) => {
+const AdMobBanner = ({ isPremium, position = "bottom", compact = false, adId = ADMOB_BANNER_ID, adSize }) => {
   const [visible, setVisible] = useState(true);
   const [adLoaded, setAdLoaded] = useState(false);
   const [nativeAdFailed, setNativeAdFailed] = useState(false);
@@ -962,8 +964,8 @@ const AdMobBanner = ({ isPremium, position = "bottom", compact = false }) => {
           // qui in modo asincrono — senza questo listener resterebbe uno spazio vuoto.
           AdMob.addListener?.("bannerAdFailedToLoad", () => setNativeAdFailed(true));
           await AdMob.showBanner({
-            adId: ADMOB_BANNER_ID,
-            adSize: compact ? "SMART_BANNER" : "BANNER",
+            adId,
+            adSize: adSize || (compact ? "SMART_BANNER" : "BANNER"),
             position: "BOTTOM_CENTER",
             margin: 0,
             isTesting: false,
@@ -982,7 +984,7 @@ const AdMobBanner = ({ isPremium, position = "bottom", compact = false }) => {
     // ── Web: carica AdSense o mostra banner simulato ──
     const t = setTimeout(() => setAdLoaded(true), 150);
     return () => clearTimeout(t);
-  }, [isPremium, isNative, visible]);
+  }, [isPremium, isNative, visible, adId, adSize]);
 
   if (isPremium || !visible) return null;
 
