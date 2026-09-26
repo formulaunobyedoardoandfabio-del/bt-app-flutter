@@ -6,6 +6,15 @@ definitions:
     - &install
       name: Installa dipendenze
       script: npm install
+    - &inject_secrets
+      name: Inserisci chiavi da variabili d'ambiente Codemagic
+      script: |
+        if [ -n "$OPENAI_API_KEY" ]; then
+          sed -i "s#__OPENAI_API_KEY__#${OPENAI_API_KEY}#" src/App.jsx
+          echo "Chiave OpenAI inserita nella build."
+        else
+          echo "Nessuna variabile OPENAI_API_KEY impostata su Codemagic: il tasto ChatGPT in Admin non funzionerà in questa build."
+        fi
     - &build_web
       name: Build app React
       script: |
@@ -40,6 +49,7 @@ workflows:
           source: true
     scripts:
       - *install
+      - *inject_secrets
       - *build_web
       - *capacitor
       - name: Compila APK debug
@@ -62,6 +72,7 @@ workflows:
         - bt_keystore
     scripts:
       - *install
+      - *inject_secrets
       - *build_web
       - *capacitor
       - name: Compila AAB di release

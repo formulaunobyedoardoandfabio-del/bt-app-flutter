@@ -51,6 +51,19 @@ const AD_BANNER_H = 60;
 // i pagamenti reali con Stripe. Vedi cartella functions/ per il codice backend e
 // functions/README.md per le istruzioni di deploy (chiave Stripe, webhook, ecc).
 const FUNCTIONS_BASE = "https://us-central1-bt-app-50703.cloudfunctions.net";
+// Chiave OpenAI per il tasto "ChatGPT" nell'Admin (form NEWS). Per scelta di
+// Edoardo sta lato client (niente piano Firebase Blaze per ora), quindi è
+// estraibile da chi scompatta l'APK — come protezione resta il limite di
+// spesa impostato su platform.openai.com. Il placeholder qui sotto viene
+// sostituito con la chiave vera SOLO durante la build su Codemagic (script
+// "Inserisci chiavi" in codemagic.yaml), a partire dalla variabile
+// d'ambiente OPENAI_API_KEY impostata sul sito di Codemagic — così la
+// chiave vera non finisce mai in questo file né nella cronologia Git
+// (GitHub blocca comunque il push se rileva una chiave vera nel codice).
+// Se in futuro si attiva Blaze, la funzione generateArticle in
+// functions/index.js è già pronta per riprendere in mano questa chiamata
+// lato server, più sicura.
+const OPENAI_API_KEY = "__OPENAI_API_KEY__";
 const ADMOB_UNIT_ID    = ADMOB_BANNER_ID; // alias per compatibilità
 const PREMIUM_PRICE  = "2,99€/mese";
 const PREMIUM_ANNUAL = "24,99€/anno";
@@ -1546,7 +1559,7 @@ const AdminPanel=({news,setNews,fanta,setFanta,piloti,setPiloti,costruttori,setC
   const [imgUploading,setImgUploading]=useState(false);const [imgErr,setImgErr]=useState("");
   const onPickImage=async e=>{const file=e.target.files?.[0];e.target.value="";if(!file)return;setImgErr("");setImgUploading(true);try{const url=await uploadImage(file);setF(p=>({...p,image:url}));}catch(err){console.error("uploadImage error:",err);setImgErr("Upload non riuscito, riprova");}setImgUploading(false);};
   const [genLoading,setGenLoading]=useState(false);const [genErr,setGenErr]=useState("");
-  const genArticle=async()=>{if(!f.title){setGenErr("Scrivi prima un titolo");return;}setGenErr("");setGenLoading(true);try{const r=await fetch(`${FUNCTIONS_BASE}/generateArticle`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({title:f.title,summary:f.summary,category:f.category})});const d=await r.json();if(!r.ok)throw new Error(d.error||"Errore ChatGPT");setF(p=>({...p,content:d.content}));}catch(err){console.error("genArticle error:",err);setGenErr("ChatGPT non ha risposto, riprova");}setGenLoading(false);};
+  const genArticle=async()=>{if(!f.title){setGenErr("Scrivi prima un titolo");return;}setGenErr("");setGenLoading(true);try{const prompt=["Scrivi un articolo per un'app di news di Formula 1 (B&T).",`Categoria: ${f.category||"NEWS"}.`,`Titolo: ${f.title}`,f.summary?`Sottotitolo/riassunto: ${f.summary}`:null,"","Scrivi in italiano, tono da redazione sportiva, 3-4 paragrafi brevi, senza inventare citazioni dirette di persone reali né dati di gara specifici non forniti. Restituisci solo il testo dell'articolo, senza titolo ripetuto e senza note editoriali."].filter(Boolean).join("\n");const r=await fetch("https://api.openai.com/v1/chat/completions",{method:"POST",headers:{"Content-Type":"application/json",Authorization:`Bearer ${OPENAI_API_KEY}`},body:JSON.stringify({model:"gpt-4o-mini",messages:[{role:"user",content:prompt}],max_tokens:700,temperature:0.7})});const d=await r.json();if(!r.ok)throw new Error(d.error?.message||"Errore ChatGPT");setF(p=>({...p,content:d.choices?.[0]?.message?.content?.trim()||""}));}catch(err){console.error("genArticle error:",err);setGenErr("ChatGPT non ha risposto, riprova");}setGenLoading(false);};
   const saveN=async u=>{setNews(u);await ss("bt-news",u);};const addN=async()=>{if(!f.title)return;await saveN([{...f,id:uid(),date:new Date().toISOString()},...news]);setF({title:"",summary:"",category:"NEWS",author:"Team B&T",image:"",content:"",published:true});setCustomCat(false);};
   const [nff,setNff]=useState({name:"",team:""});const saveF=async u=>{setFanta(u);await ss("bt-fanta-pilots",u);};const addF=async()=>{if(!nff.name)return;await saveF([...fanta,{...nff,id:uid(),price:10,points:0}]);setNff({name:"",team:""});};
   const [pT,setPT]=useState("PILOTI");const pD=pT==="PILOTI"?piloti:costruttori;const setPD=pT==="PILOTI"?setPiloti:setCostruttori;const pK=pT==="PILOTI"?"bt-piloti":"bt-costruttori";

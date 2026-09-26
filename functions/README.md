@@ -110,28 +110,43 @@ davvero pagato (o, peggio, che nessuno paga).
 
 ## 8. Assistente ChatGPT nel pannello Admin (facoltativo)
 
-Il bottone "Genera con ChatGPT" nel form NEWS dell'Admin passa dalla funzione
-`generateArticle`, che usa una chiave OpenAI. Stessa regola di Stripe: la
-chiave vive solo come secret sul server, mai nel codice.
+Il bottone "Genera con ChatGPT" nel form NEWS dell'Admin chiama OpenAI
+**direttamente dall'app**, non dalla funzione `generateArticle` qui sotto:
+scelta fatta perché usare i secret (come per Stripe) richiede il piano
+Firebase Blaze, e per ora si è deciso di evitarlo solo per questa funzione
+opzionale.
 
-1. Vai su [platform.openai.com/api-keys](https://platform.openai.com/api-keys)
-   e crea una nuova chiave (**Create new secret key**).
+⚠️ **Compromesso di sicurezza consapevole**: a differenza delle chiavi
+Stripe (sempre e solo sul server), la chiave OpenAI finisce dentro l'APK
+compilato ed è quindi recuperabile da chi lo scompatta. Per non farla
+finire anche nella cronologia Git — dove bot pubblici la troverebbero in
+pochi minuti, molto peggio della sola APK — **non sta scritta nel codice**:
+in `src/App.jsx` c'è solo un placeholder (`__OPENAI_API_KEY__`), sostituito
+con la chiave vera solo durante la build, da Codemagic.
 
-   ⚠️ Se avevi già condiviso una chiave OpenAI in chat o altrove, quella va
-   considerata compromessa: eliminala da quella pagina (**Revoke**) e usa
-   solo una chiave nuova, che non hai mai scritto da nessuna parte
-   pubblica — chiunque la trovasse potrebbe spendere soldi tuoi.
-2. Imposta il secret (dalla cartella principale del progetto):
-   ```bash
-   firebase functions:secrets:set OPENAI_API_KEY
-   # incolla qui la nuova chiave (sk-...)
-   ```
-3. Pubblica di nuovo le funzioni:
-   ```bash
-   firebase deploy --only functions
-   ```
+**Impostare la chiave (una volta sola, dal sito di Codemagic, niente
+terminale):**
+1. Vai su [codemagic.io](https://codemagic.io/) → il tuo app B&T →
+   **Settings → Environment variables**.
+2. Aggiungi una variabile: nome `OPENAI_API_KEY`, valore la tua chiave
+   (da [platform.openai.com/api-keys](https://platform.openai.com/api-keys)),
+   gruppo a piacere (o nessuno). Spunta **"Secure"** così non compare mai
+   nei log della build.
+3. Salva e avvia una nuova build ("B&T - APK di prova"): lo script
+   "Inserisci chiavi" in `codemagic.yaml` la inietta automaticamente al
+   posto del placeholder prima di compilare.
 
-Da questo momento il bottone "Genera con ChatGPT" nel pannello Admin
-funziona. Ogni testo generato consuma credito sul tuo account OpenAI (pochi
-centesimi per articolo con il modello usato), quindi conviene tenere
-d'occhio i consumi su platform.openai.com/usage.
+Mantieni anche un **limite di spesa mensile** su
+[platform.openai.com/settings/organization/limits](https://platform.openai.com/settings/organization/limits)
+— è l'unica vera protezione contro un uso non tuo della chiave, dato che
+vive nell'APK. Ogni testo generato consuma credito OpenAI (pochi centesimi
+per articolo), controllabile su platform.openai.com/usage.
+
+Se in futuro si attiva il piano Blaze (ad es. per i pagamenti Stripe veri,
+che lo richiedono comunque), vale la pena spostare anche questa chiamata sul
+server: la funzione `generateArticle` qui sotto è già scritta e pronta,
+semplicemente oggi il bottone non la usa.
+
+Per cambiare la chiave in futuro basta aggiornare la variabile
+`OPENAI_API_KEY` su Codemagic (stesso punto sopra) e avviare una nuova
+build — non serve toccare il codice.
