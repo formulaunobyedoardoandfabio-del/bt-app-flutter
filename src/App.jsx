@@ -951,100 +951,38 @@ const useAdMob = () => {
 };
 
 const AdMobBanner = ({ isPremium, position = "bottom", compact = false, adId = ADMOB_BANNER_ID, adSize }) => {
-  const [visible, setVisible] = useState(true);
-  const [adLoaded, setAdLoaded] = useState(false);
-  const [nativeAdFailed, setNativeAdFailed] = useState(false);
   const isNative = useAdMob();
 
   useEffect(() => {
-    if (isPremium || !visible) {
-      // Utente diventato Premium (o banner chiuso): rimuovi il banner nativo
-      // così non resta agganciato sopra la Nav in modo permanente.
-      if (isNative) {
+    if (isPremium || !isNative) return;
+    (async () => {
+      try {
         const { AdMob } = { AdMob: window.Capacitor?.Plugins?.AdMob };
-        AdMob?.removeBanner?.().catch(() => {});
-      }
-      return;
-    }
-    if (isNative) {
-      // ── APK: usa Capacitor AdMob SDK ──
-      (async () => {
-        try {
-          const { AdMob, BannerAdSize, BannerAdPosition } = { AdMob: window.Capacitor?.Plugins?.AdMob };
-          if (!AdMob) { setAdLoaded(true); setNativeAdFailed(true); return; }
-          await AdMob.initialize({ requestTrackingAuthorization: true });
-          // Se Google non ha un annuncio da mostrare (no-fill) il plugin lo segnala
-          // qui in modo asincrono — senza questo listener resterebbe uno spazio vuoto.
-          AdMob.addListener?.("bannerAdFailedToLoad", () => setNativeAdFailed(true));
-          await AdMob.showBanner({
-            adId,
-            adSize: adSize || (compact ? "SMART_BANNER" : "BANNER"),
-            position: "BOTTOM_CENTER",
-            margin: 0,
-            isTesting: false,
-          });
-          setAdLoaded(true);
-        } catch(e) { setAdLoaded(true); setNativeAdFailed(true); }
-      })();
-      // Cleanup: se il componente si smonta (es. cambio pagina) rimuovi il banner nativo,
-      // altrimenti resterebbe visibile sopra le altre schede e bloccherebbe i tap sulla Nav.
-      return () => {
-        const { AdMob } = { AdMob: window.Capacitor?.Plugins?.AdMob };
-        AdMob?.removeAllListeners?.().catch(() => {});
-        AdMob?.removeBanner?.().catch(() => {});
-      };
-    }
-    // ── Web: carica AdSense o mostra banner simulato ──
-    const t = setTimeout(() => setAdLoaded(true), 150);
-    return () => clearTimeout(t);
-  }, [isPremium, isNative, visible, adId, adSize]);
+        if (!AdMob) return;
+        await AdMob.initialize({ requestTrackingAuthorization: true });
+        await AdMob.showBanner({
+          adId,
+          adSize: adSize || (compact ? "SMART_BANNER" : "BANNER"),
+          position: "BOTTOM_CENTER",
+          margin: 0,
+          isTesting: false,
+        });
+      } catch (e) { /* nessun annuncio disponibile in questo momento: niente da mostrare */ }
+    })();
+    // Cleanup: se il componente si smonta (es. cambio pagina) rimuovi il banner nativo,
+    // altrimenti resterebbe visibile sopra le altre schede e bloccherebbe i tap sulla Nav.
+    return () => {
+      const { AdMob } = { AdMob: window.Capacitor?.Plugins?.AdMob };
+      AdMob?.removeAllListeners?.().catch(() => {});
+      AdMob?.removeBanner?.().catch(() => {});
+    };
+  }, [isPremium, isNative, adId, adSize]);
 
-  if (isPremium || !visible) return null;
-
-  // Su APK nativo, il banner è gestito nativamente — nascondi il div web,
-  // a meno che Google non abbia nessun annuncio da mostrare: in quel caso
-  // meglio il banner sponsor qui sotto che uno spazio vuoto.
-  if (isNative && !nativeAdFailed) return <div style={{ height: compact ? 44 : 60 }}/>;
-
-  const h = compact ? 44 : 60;
-  return (
-    <div style={{ width:"100%", height:h, background:"#111",
-      borderTop:`1px solid ${A.border}`, borderBottom:`1px solid ${A.border}`,
-      display:"flex", alignItems:"center", justifyContent:"space-between",
-      padding:"0 12px", position:"relative", overflow:"hidden" }}>
-      {!adLoaded && (
-        <div style={{ position:"absolute", inset:0,
-          background:"linear-gradient(90deg,#111 25%,#1a1a1a 50%,#111 75%)",
-          backgroundSize:"200% 100%", animation:"shimmer 1.2s infinite" }}/>
-      )}
-      {adLoaded && <>
-        <div style={{ display:"flex", alignItems:"center", gap:10 }}>
-          <div style={{ width:compact?36:48, height:compact?36:48,
-            background:`${A.red}22`, borderRadius:8,
-            display:"flex", alignItems:"center", justifyContent:"center",
-            border:`1px solid ${A.red}44`, flexShrink:0 }}>
-            <span style={{ fontSize:compact?16:22 }}>🏎️</span>
-          </div>
-          <div>
-            <div style={{ fontSize:compact?11:12, color:A.text, fontWeight:700, lineHeight:1.2 }}>
-              {compact ? "Sponsor B&T App" : "Scopri i migliori accessori F1"}
-            </div>
-            {!compact && <div style={{ fontSize:10, color:A.muted, marginTop:2 }}>
-              Partner ufficiale — tap per saperne di più
-            </div>}
-          </div>
-        </div>
-        <div style={{ display:"flex", flexDirection:"column", alignItems:"flex-end", gap:4 }}>
-          <span style={{ fontSize:9, color:A.dim, border:`1px solid ${A.dim}`,
-            borderRadius:3, padding:"1px 4px" }}>Annuncio</span>
-          <button onClick={()=>setVisible(false)} style={{
-            background:"none", border:"none", cursor:"pointer",
-            color:A.dim, fontSize:16, lineHeight:1, padding:0 }}>×</button>
-        </div>
-      </>}
-      <style>{`@keyframes shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}`}</style>
-    </div>
-  );
+  if (isPremium || !isNative) return null;
+  // Il banner vero lo gestisce nativamente AdMob (overlay sopra la WebView);
+  // questo div riserva solo lo spazio corrispondente nel layout — niente più
+  // banner finto di riserva (rimosso: ora ci sono le pubblicità vere).
+  return <div style={{ height: compact ? 44 : 60 }}/>;
 };
 
 // ════════════════════════════════════════════════════════
@@ -1497,7 +1435,7 @@ const FeedbackModal = ({ onClose, user }) => {
 // ── Floating Feedback Button
 const FeedbackFAB = ({ onClick }) => (
   <button onClick={onClick} style={{
-    position:"fixed", bottom:76, right:16, width:44, height:44,
+    position:"fixed", bottom:"calc(76px + var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px)))", right:16, width:44, height:44,
     borderRadius:"50%", background:"#E10600",
     boxShadow:"0 4px 16px rgba(225,6,0,.5)",
     border:"none", cursor:"pointer", fontSize:18, zIndex:100,
