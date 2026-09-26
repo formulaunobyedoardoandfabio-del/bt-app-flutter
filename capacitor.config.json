@@ -1,0 +1,8 @@
+{
+  "appId": "com.bt.formula1",
+  "appName": "B&T Formula1",
+  "webDir": "build",
+  "server": {
+    "androidScheme": "https"
+  }
+}

@@ -1,55 +1,64 @@
+definitions:
+  environment: &env
+    node: 22
+    java: 21
+  scripts:
+    - &install
+      name: Installa dipendenze
+      script: npm install
+    - &build_web
+      name: Build app React
+      script: |
+        export CI=false
+        export DISABLE_ESLINT_PLUGIN=true
+        export GENERATE_SOURCEMAP=false
+        export NODE_OPTIONS="--max-old-space-size=6144"
+        npm run build
+    - &capacitor
+      name: Crea progetto Android (Capacitor + AdMob)
+      script: |
+        npx cap add android
+        npx cap sync android
+        python3 scripts/prepare_android.py
+        chmod +x android/gradlew
+
 workflows:
-  react-capacitor-android:
-    name: B&T Formula1 - Android APK
+  # 1) APK di prova da installare sul telefono
+  apk-test:
+    name: B&T - APK di prova
     max_build_duration: 60
-    environment:
-      node: 22.0.0
-      java: 17
+    environment: *env
     scripts:
-      - name: Installa dipendenze npm
-        script: |
-          npm ci
-
-      - name: Build React App
-        script: |
-          export CI=false
-          export GENERATE_SOURCEMAP=false
-          export NODE_OPTIONS="--max-old-space-size=4096"
-          npm run build
-
-      - name: Setup Capacitor Android
-        script: |
-          npx cap add android 2>/dev/null || true
-          npx cap sync android
-
-      - name: Inietta AdMob App ID
-        script: |
-          MANIFEST="android/app/src/main/AndroidManifest.xml"
-          if ! grep -q "APPLICATION_ID" "$MANIFEST"; then
-            sed -i 's|</application>|    <meta-data android:name="com.google.android.gms.ads.APPLICATION_ID" android:value="ca-app-pub-5787516371588469~8054706643"/>\n    </application>|' "$MANIFEST"
-          fi
-
-      - name: Aggiungi AdMob SDK
-        script: |
-          GRADLE="android/app/build.gradle"
-          if ! grep -q "play-services-ads" "$GRADLE"; then
-            sed -i "/dependencies {/a\\    implementation 'com.google.android.gms:play-services-ads:23.0.0'" "$GRADLE"
-          fi
-
-      - name: Compila APK
-        script: |
-          chmod +x android/gradlew
-          cd android
-          ./gradlew assembleDebug --no-daemon \
-            -Dorg.gradle.jvmargs="-Xmx4g"
-
+      - *install
+      - *build_web
+      - *capacitor
+      - name: Compila APK debug
+        script: cd android && ./gradlew assembleDebug --no-daemon
     artifacts:
-      - android/app/build/outputs/apk/debug/app-debug.apk
-
+      - android/app/build/outputs/apk/debug/*.apk
     publishing:
       email:
         recipients:
           - formulaunobyedoardoandfabio@gmail.com
-        notify:
-          success: true
-          failure: true
+
+  # 2) AAB firmato da caricare sul Play Store
+  #    Prima carica il keystore su Codemagic con nome "bt_keystore"
+  play-store:
+    name: B&T - Play Store (AAB firmato)
+    max_build_duration: 60
+    environment:
+      <<: *env
+      android_signing:
+        - bt_keystore
+    scripts:
+      - *install
+      - *build_web
+      - *capacitor
+      - name: Compila AAB di release
+        script: cd android && ./gradlew bundleRelease --no-daemon
+    artifacts:
+      - android/app/build/outputs/bundle/release/*.aab
+    publishing:
+      email:
+        recipients:
+          - formulaunobyedoardoandfabio@gmail.com
