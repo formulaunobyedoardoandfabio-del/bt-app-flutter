@@ -28,6 +28,16 @@ workflows:
     name: B&T - APK di prova
     max_build_duration: 60
     environment: *env
+    # Build automatica a ogni push su main (una volta collegato il webhook
+    # su GitHub — vedi README.md), così non serve più premere "Start new
+    # build" a mano dopo ogni correzione.
+    triggering:
+      events:
+        - push
+      branch_patterns:
+        - pattern: main
+          include: true
+          source: true
     scripts:
       - *install
       - *build_web
