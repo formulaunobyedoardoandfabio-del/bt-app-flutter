@@ -1,4 +1,4 @@
-# B&T Formula1
+# B&T App
 
 App React + Capacitor (Android) con Firebase, AdMob e dati live OpenF1.
 
