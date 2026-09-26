@@ -8,3 +8,9 @@ App React + Capacitor (Android) con Firebase, AdMob e dati live OpenF1.
   Richiede un keystore caricato su Codemagic con nome `bt_keystore`.
 
 `public/app-ads.txt` va pubblicato sul sito indicato nella scheda Play Store.
+
+## Pagamenti Premium (Stripe)
+Il backend dei pagamenti reali è in `functions/` (Firebase Cloud Functions).
+Il codice è pronto, ma il deploy iniziale (account Stripe, chiavi, webhook)
+va fatto una volta sola a mano: istruzioni passo-passo in
+`functions/README.md`.

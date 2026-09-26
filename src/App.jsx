@@ -43,6 +43,13 @@ const EMAILJS = {
 const ADMOB_APP_ID     = "ca-app-pub-5787516371588469~8054706643";
 const ADMOB_BANNER_ID  = "ca-app-pub-5787516371588469/2997561321";
 const ADMOB_REWARD_ID  = "ca-app-pub-5787516371588469/6784763097";
+// Altezza riservata per il banner AdMob nativo (standard BANNER = 50dp + margine di sicurezza).
+// Serve per spostare su la Nav in basso e non far coprire i tab dal banner nativo.
+const AD_BANNER_H = 60;
+// Cloud Functions Firebase (progetto bt-app-50703, regione di default) che gestiscono
+// i pagamenti reali con Stripe. Vedi cartella functions/ per il codice backend e
+// functions/README.md per le istruzioni di deploy (chiave Stripe, webhook, ecc).
+const FUNCTIONS_BASE = "https://us-central1-bt-app-50703.cloudfunctions.net";
 const ADMOB_UNIT_ID    = ADMOB_BANNER_ID; // alias per compatibilità
 const PREMIUM_PRICE  = "2,99€/mese";
 const PREMIUM_ANNUAL = "24,99€/anno";
@@ -261,7 +268,7 @@ const BtLogo=()=>(
   </div>
 );
 const Hdr=({onProfile,onNotif,unreadCount,isPremium,onUpgrade})=>(
-  <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"12px 16px",borderBottom:`1px solid ${A.border}`,background:A.bg,position:"sticky",top:0,zIndex:20}}>
+  <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"12px 16px",paddingTop:"calc(12px + var(--safe-area-inset-top, env(safe-area-inset-top, 0px)))",borderBottom:`1px solid ${A.border}`,background:A.bg,position:"sticky",top:0,zIndex:20}}>
     <BtLogo/>
     <div style={{display:"flex",gap:10,alignItems:"center"}}>
       {isPremium?<PremiumBadge/>:<button onClick={onUpgrade} style={{background:`${A.red}18`,border:`1px solid ${A.red}44`,borderRadius:8,padding:"4px 10px",cursor:"pointer",color:A.red,fontSize:11,fontWeight:700}}>⭐ Premium</button>}
@@ -317,9 +324,11 @@ const NotifCenter=({notifs,onClose,onMarkRead})=>{
     </div>
   );
 };
-const Nav=({p,set})=>{
+const Nav=({p,set,adOffset=0})=>{
   const T=[{id:"home",l:"HOME",i:<Home size={20}/>},{id:"instagram",l:"INSTAGRAM",i:<span style={{fontSize:19}}>📷</span>},{id:"chat",l:"CHAT",i:<MessageSquare size={20}/>},{id:"fanta",l:"FANTA",i:<Trophy size={20}/>},{id:"live",l:"LIVE",i:<Activity size={20}/>}];
-  return <div style={{display:"flex",position:"fixed",bottom:0,left:0,right:0,maxWidth:430,margin:"0 auto",background:A.bg,borderTop:`1px solid ${A.border}`,zIndex:50}}>{T.map(t=><button key={t.id} onClick={()=>set(t.id)} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:3,border:"none",background:"transparent",cursor:"pointer",padding:"8px 0",color:p===t.id?A.red:A.dim}}>{t.i}<span style={{fontSize:9,fontWeight:700}}>{t.l}</span></button>)}</div>;
+  // adOffset: quando il banner AdMob nativo è attivo, la Nav si sposta su di quell'altezza
+  // così il banner (ancorato in basso da Android) non copre più i pulsanti delle schede.
+  return <div style={{display:"flex",position:"fixed",bottom:`calc(${adOffset}px + var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px)))`,left:0,right:0,maxWidth:430,margin:"0 auto",background:A.bg,borderTop:`1px solid ${A.border}`,zIndex:50}}>{T.map(t=><button key={t.id} onClick={()=>set(t.id)} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:3,border:"none",background:"transparent",cursor:"pointer",padding:"8px 0",color:p===t.id?A.red:A.dim}}>{t.i}<span style={{fontSize:9,fontWeight:700}}>{t.l}</span></button>)}</div>;
 };
 const Inp=({ph,val,chg,type="text",s,rows})=>rows
   ?<textarea placeholder={ph} value={val} onChange={chg} rows={rows} style={{background:A.card,border:`1px solid ${A.border}`,borderRadius:10,padding:"11px 13px",color:A.text,fontSize:14,width:"100%",outline:"none",resize:"vertical",fontFamily:"inherit",...s}}/>
@@ -920,7 +929,15 @@ const AdMobBanner = ({ isPremium, position = "bottom", compact = false }) => {
   const isNative = useAdMob();
 
   useEffect(() => {
-    if (isPremium || !visible) return;
+    if (isPremium || !visible) {
+      // Utente diventato Premium (o banner chiuso): rimuovi il banner nativo
+      // così non resta agganciato sopra la Nav in modo permanente.
+      if (isNative) {
+        const { AdMob } = { AdMob: window.Capacitor?.Plugins?.AdMob };
+        AdMob?.removeBanner?.().catch(() => {});
+      }
+      return;
+    }
     if (isNative) {
       // ── APK: usa Capacitor AdMob SDK ──
       (async () => {
@@ -938,12 +955,17 @@ const AdMobBanner = ({ isPremium, position = "bottom", compact = false }) => {
           setAdLoaded(true);
         } catch(e) { setAdLoaded(true); }
       })();
-      return;
+      // Cleanup: se il componente si smonta (es. cambio pagina) rimuovi il banner nativo,
+      // altrimenti resterebbe visibile sopra le altre schede e bloccherebbe i tap sulla Nav.
+      return () => {
+        const { AdMob } = { AdMob: window.Capacitor?.Plugins?.AdMob };
+        AdMob?.removeBanner?.().catch(() => {});
+      };
     }
     // ── Web: carica AdSense o mostra banner simulato ──
     const t = setTimeout(() => setAdLoaded(true), 150);
     return () => clearTimeout(t);
-  }, [isPremium, isNative]);
+  }, [isPremium, isNative, visible]);
 
   if (isPremium || !visible) return null;
 
@@ -996,24 +1018,57 @@ const AdMobBanner = ({ isPremium, position = "bottom", compact = false }) => {
 // Si apre quando l'utente clicca "Passa a Premium"
 // onUpgrade(plan) → aggiorna Firebase e stato locale
 // ════════════════════════════════════════════════════════
-const PremiumModal = ({ onClose, onUpgrade, isPremium }) => {
+const PremiumModal = ({ onClose, onUpgrade, isPremium, user }) => {
   const [plan, setPlan] = useState("monthly"); // monthly | annual
   const [loading, setLoading] = useState(false);
+  const [waiting, setWaiting] = useState(false);
   const [done, setDone] = useState(false);
+  const [payErr, setPayErr] = useState("");
 
+  // ── PAGAMENTO REALE (Stripe Checkout) ──
+  // 1) chiediamo alla Cloud Function di creare una sessione di pagamento Stripe
+  // 2) apriamo la pagina di pagamento (in-app browser su APK, nuova scheda sul web)
+  // 3) il pagamento viene confermato dal webhook lato server (mai dal client),
+  //    quindi controlliamo Firestore finché isPremium non diventa vero
   const handleUpgrade = async () => {
+    if (!user?.email) { setPayErr("Devi accedere prima di abbonarti."); return; }
+    setPayErr("");
     setLoading(true);
-    // ── STRIPE / GOOGLE PLAY ──
-    // In produzione: reindirizza a Stripe Checkout o avvia Play Billing
-    // Esempio Stripe:
-    // const stripe = await loadStripe("pk_live_TUACHIAVE");
-    // await stripe.redirectToCheckout({ lineItems: [...], mode: "subscription", ... });
-    //
-    // Per ora: simula acquisto completato
-    await new Promise(r => setTimeout(r, 1200));
-    await onUpgrade(plan);
-    setDone(true);
-    setLoading(false);
+    try {
+      const r = await fetch(`${FUNCTIONS_BASE}/createCheckoutSession`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: user.email, plan }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok || !data.url) throw new Error(data.error || "Impossibile avviare il pagamento. Riprova tra poco.");
+
+      const isNativeApp = typeof window !== "undefined" && window.Capacitor?.isNativePlatform?.();
+      const BrowserPlugin = window.Capacitor?.Plugins?.Browser;
+      if (isNativeApp && BrowserPlugin) await BrowserPlugin.open({ url: data.url });
+      else window.open(data.url, "_blank");
+
+      setLoading(false);
+      setWaiting(true);
+      const startedAt = Date.now();
+      const poll = setInterval(async () => {
+        const fresh = await dbGet("users", user.email);
+        if (fresh?.isPremium) {
+          clearInterval(poll);
+          if (isNativeApp && BrowserPlugin) BrowserPlugin.close().catch(() => {});
+          setWaiting(false);
+          await onUpgrade(fresh);
+          setDone(true);
+        } else if (Date.now() - startedAt > 6 * 60 * 1000) {
+          clearInterval(poll); // 6 minuti senza conferma: l'utente potrebbe aver annullato
+          setWaiting(false);
+          setPayErr("Non abbiamo ancora ricevuto conferma del pagamento. Se hai completato il pagamento su Stripe, riapri questa schermata tra poco.");
+        }
+      }, 3000);
+    } catch (e) {
+      setLoading(false);
+      setPayErr(e.message || "Errore durante l'avvio del pagamento.");
+    }
   };
 
   const features = [
@@ -1085,15 +1140,17 @@ const PremiumModal = ({ onClose, onUpgrade, isPremium }) => {
           </div>
 
           {/* CTA */}
+          {payErr && <p style={{ background:"#E1060018",border:`1px solid ${A.red}`,borderRadius:10,padding:"9px 14px",marginBottom:12,color:A.red,fontSize:12,lineHeight:1.5 }}>{payErr}</p>}
           <Btn
-            ch={loading ? "Attendi…" : `ABBONATI — ${plan==="monthly" ? PREMIUM_PRICE : PREMIUM_ANNUAL}`}
+            ch={waiting ? "In attesa del pagamento…" : loading ? "Attendi…" : `ABBONATI — ${plan==="monthly" ? PREMIUM_PRICE : PREMIUM_ANNUAL}`}
             onClick={handleUpgrade}
-            dis={loading}
-            s={{ marginBottom:12, background: loading ? "#555" : A.red, fontSize:15 }}
+            dis={loading||waiting}
+            s={{ marginBottom:12, background: (loading||waiting) ? "#555" : A.red, fontSize:15 }}
           />
+          {waiting && <p style={{ textAlign:"center",fontSize:12,color:A.muted,marginBottom:12,lineHeight:1.5 }}>Completa il pagamento nella scheda che si è aperta. Questa schermata si aggiornerà da sola.</p>}
           <p style={{ textAlign:"center",fontSize:11,color:A.dim,lineHeight:1.6 }}>
             Annulla in qualsiasi momento · Rinnovo automatico<br/>
-            <span style={{ color:A.red }}>Stripe sicuro · Postepay accettata</span>
+            <span style={{ color:A.red }}>Pagamento sicuro con Stripe · carte accettate</span>
           </p>
         </div>
       </div>
@@ -1515,7 +1572,7 @@ export default function BTApp(){
   const [costr,setCostr]=useState(D_COSTR);const [fanta,setFanta]=useState(D_FANTA);
   const [races,setRaces]=useState(D_RACES);const [ig,setIg]=useState(D_IG);
 
-  useEffect(()=>{(async()=>{try{const sess=await sg("bt-sess",false);if(sess){const u=await sg(`bt-u-${sess.email}`,false);if(u)setUser(u);}const shared=[["bt-news",setNews],["bt-piloti",setPiloti],["bt-costruttori",setCostr],["bt-fanta-pilots",setFanta],["bt-races",setRaces],["bt-ig-config",setIg]];await Promise.all(shared.map(async([k,s])=>{const d=await sg(k,true);if(d)s(d);}));}catch{}setLoading(false);})();},[]);
+  useEffect(()=>{(async()=>{try{const sess=await dbGet("sessions","current");if(sess){const u=await dbGet("users",sess.email);if(u)setUser(u);}const shared=[["bt-news",setNews],["bt-piloti",setPiloti],["bt-costruttori",setCostr],["bt-fanta-pilots",setFanta],["bt-races",setRaces],["bt-ig-config",setIg]];await Promise.all(shared.map(async([k,s])=>{const d=await sg(k,true);if(d)s(d);}));}catch{}setLoading(false);})();},[]);
 
   const doLogin=u=>{setUser(u);setAuth(false);};
   const doLogout=async()=>{await dbDelete("sessions","current");setUser(null);setPrem(false);setUnl(new Set());};
@@ -1529,21 +1586,27 @@ export default function BTApp(){
   const closeNotifs=()=>{setShowNotifs(false);markAllRead();};
   const [showPremium,setShowPremium]=useState(false);
 
-  const upgradeToPremium=async(plan="monthly")=>{
-    // Qui in produzione integra Stripe / Google Play Billing
-    // Per ora: simula il pagamento e aggiorna Firebase
-    if(user){
-      const updUser={...user,isPremium:true,plan,premiumSince:new Date().toISOString()};
-      await dbSet("users",user.email,updUser);
-      await dbSet("sessions","current",{email:user.email,name:user.name,nick:user.nick,isPremium:true});
-      setUser(updUser);
+  // Il pagamento vero avviene su Stripe Checkout (aperto da PremiumModal) e viene
+  // confermato dal webhook lato server, che scrive isPremium=true su Firestore.
+  // Qui ci limitiamo a riallineare lo stato locale con quello (ormai vero) del server —
+  // non impostiamo mai isPremium noi stessi, altrimenti basterebbe toccare un bottone
+  // per avere Premium gratis.
+  const upgradeToPremium=async(freshUser)=>{
+    if(freshUser){
+      setUser(freshUser);
+      await dbSet("sessions","current",{email:freshUser.email,name:freshUser.name,nick:freshUser.nick,isPremium:!!freshUser.isPremium});
+      setPrem(!!freshUser.isPremium);
     }
-    setPrem(true);
     setShowPremium(false);
   };
 
   const downgradeFree=async()=>{
     if(user){
+      // Disdice davvero l'abbonamento Stripe, altrimenti l'utente continuerebbe
+      // a essere addebitato anche dopo aver premuto "disdici" nell'app.
+      try{
+        await fetch(`${FUNCTIONS_BASE}/cancelSubscription`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email:user.email})});
+      }catch{}
       const updUser={...user,isPremium:false,plan:"free"};
       await dbSet("users",user.email,updUser);
       await dbSet("sessions","current",{email:user.email,name:user.name,nick:user.nick,isPremium:false});
@@ -1581,6 +1644,11 @@ export default function BTApp(){
     playPageSound(p);
   };
   const isPr=page==="profile";const isND=page==="news-detail";
+  // Il banner AdMob nativo è montato solo nella Home (tra le news) ed è ancorato in basso
+  // dal sistema Android: riserviamo lo spazio alla Nav (e al contenuto) solo quando è
+  // davvero visibile — utente non Premium, APK reale, sulla schermata Home — così sulle
+  // altre schede la Nav resta normale e sulla Home non copre più i pulsanti.
+  const adBannerActive=useAdMob()&&!prem&&page==="home";
   const renderP=()=>{
     if(isPr)return <ProfilePage user={user} onLogout={doLogout} onDelete={doDelete} onAdmin={()=>setKeypad(true)} notif={notif} setNotif={setNotif} isPremium={prem} onUpgrade={()=>setShowPremium(true)} onDowngrade={downgradeFree} onAuth={needAuth} soundEnabled={soundEnabled} setSoundEnabled={setSoundEnabled} soundPrefs={soundPrefs} setSoundPrefs={setSoundPrefs} saveSoundPrefs={saveSoundPrefs} playSound={playSound}/>;
     if(isND&&selN)return <NewsDetail a={selN} back={()=>setPage("home")}/>;
@@ -1603,12 +1671,12 @@ export default function BTApp(){
       `}</style>
       {showSplash && <SplashScreen onDone={()=>setShowSplash(false)}/>}
       <Hdr onProfile={()=>setPage(isPr?"home":"profile")} onNotif={openNotifs} unreadCount={unreadCount} isPremium={prem} onUpgrade={()=>setShowPremium(true)}/>
-      <div style={{paddingBottom:80}}>{renderP()}</div>
-      {!isPr&&!isND&&<Nav p={page} set={navigateTo}/>}
+      <div style={{paddingBottom:80+(adBannerActive?AD_BANNER_H:0)}}>{renderP()}</div>
+      {!isPr&&!isND&&<Nav p={page} set={navigateTo} adOffset={adBannerActive?AD_BANNER_H:0}/>}
       {showAd&&<AdModal onClose={()=>setShowAd(false)} onDone={adDone} feature={adTgt}/>}
       {auth&&<AuthModal onClose={()=>setAuth(false)} onLogin={doLogin}/>}
       {showNotifs&&<NotifCenter notifs={notifs.map(n=>({...n,read:readIds.has(n.id)}))} onClose={closeNotifs} onMarkRead={markAllRead}/>}
-      {showPremium&&<PremiumModal onClose={()=>setShowPremium(false)} onUpgrade={upgradeToPremium} isPremium={prem}/>}
+      {showPremium&&<PremiumModal onClose={()=>setShowPremium(false)} onUpgrade={upgradeToPremium} isPremium={prem} user={user}/>}
       {showTerms&&!termsAccepted&&<TermsModal onAccept={acceptTerms}/>}
       {showCookies&&!showTerms&&<CookieBanner onAccept={()=>acceptCookies(true)} onReject={()=>acceptCookies(false)}/>}
       {!showSplash&&!showTerms&&<FeedbackFAB onClick={()=>setShowFeedback(true)}/>}

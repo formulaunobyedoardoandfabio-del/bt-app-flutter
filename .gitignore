@@ -4,3 +4,5 @@ android/
 .env
 *.keystore
 *.jks
+__pycache__/
+*.pyc
