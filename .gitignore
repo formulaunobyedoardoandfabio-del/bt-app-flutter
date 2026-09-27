@@ -6,3 +6,4 @@ android/
 *.jks
 __pycache__/
 *.pyc
+.superpowers/
