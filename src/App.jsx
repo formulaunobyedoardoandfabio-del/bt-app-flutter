@@ -274,13 +274,17 @@ function cd(ds){const d=new Date(ds)-new Date();if(d<=0)return null;return{d:Mat
 async function ss(k,v,sh=true){
   if(!sh){local.set(k,v);return;}
   const db=await getDb();
-  if(db){try{await db.collection(sh?"shared":"private").doc(k).set(JSON.parse(JSON.stringify(v)),{merge:true});}catch{}}
+  // Firestore vuole sempre un oggetto come radice del documento: un array
+  // nudo viene rifiutato dal SDK (l'errore finisce nel catch qui sotto e
+  // il salvataggio sparisce nel nulla). Lo incapsuliamo in {__arr:[...]}.
+  const payload=Array.isArray(v)?{__arr:v}:v;
+  if(db){try{await db.collection(sh?"shared":"private").doc(k).set(JSON.parse(JSON.stringify(payload)),{merge:true});}catch{}}
   else{try{if(typeof localStorage!=="undefined")localStorage.setItem("bt_"+k,JSON.stringify(v));}catch{}}
 }
 async function sg(k,sh=true){
   if(!sh)return local.get(k);
   const db=await getDb();
-  if(db){try{const d=await db.collection(sh?"shared":"private").doc(k).get();return d.exists?d.data():null;}catch{return null;}}
+  if(db){try{const d=await db.collection(sh?"shared":"private").doc(k).get();if(!d.exists)return null;const data=d.data();return(data&&data.__arr!==undefined)?data.__arr:data;}catch{return null;}}
   try{if(typeof localStorage!=="undefined"){const v=localStorage.getItem("bt_"+k);return v?JSON.parse(v):null;}}catch{}
   return null;
 }
