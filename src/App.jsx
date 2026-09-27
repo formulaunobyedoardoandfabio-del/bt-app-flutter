@@ -687,7 +687,7 @@ const LivePage=({races,piloti,costruttori,isPremium,unlocked,onAd,user,onAuth,on
         <div style={{display:"flex",gap:8,paddingBottom:12}}>
           {["GARA","TEAM RADIO"].map(t=>(
             <button key={t} onClick={()=>setLiveTab(t)} style={{padding:"7px 16px",fontSize:12,fontWeight:800,fontStyle:"italic",background:liveTab===t?A.red:"transparent",color:liveTab===t?"#fff":A.muted,border:liveTab===t?"none":`1px solid ${A.border}`,borderRadius:20,cursor:"pointer"}}>
-              {t==="TEAM RADIO"&&<Radio size={11} style={{marginRight:4}}/>}{t}
+              {t==="TEAM RADIO"?<Radio size={11} style={{marginRight:4}}/>:<span style={{marginRight:4}}>🛞</span>}{t}
             </button>
           ))}
         </div>
@@ -1145,21 +1145,19 @@ const PremiumBadge = () => (
 const SplashScreen = ({ onDone }) => {
   const [fade, setFade] = useState(false);
   useEffect(() => {
-    // rete di sicurezza: se il video non parte/non finisce mai, si passa
-    // comunque avanti poco dopo la sua durata reale (10s)
-    const t = setTimeout(() => { setFade(true); setTimeout(onDone, 600); }, 10500);
+    const t = setTimeout(() => { setFade(true); setTimeout(onDone, 600); }, 1800);
     return () => clearTimeout(t);
   }, []);
-  const handleEnded = () => { setFade(true); setTimeout(onDone, 600); };
   return (
     <div style={{
       position:"fixed", inset:0, background:"#000", zIndex:9999,
-      display:"flex", alignItems:"center", justifyContent:"center",
+      display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", gap:14,
       transition:"opacity .6s ease", opacity: fade ? 0 : 1,
     }}>
-      <video src="/splash.mp4" autoPlay muted playsInline onEnded={handleEnded} style={{
-        width:"100%", height:"100%", objectFit:"contain",
-      }}/>
+      <div style={{background:A.red,borderRadius:16,padding:"18px 24px",boxShadow:`0 0 50px ${A.red}55`,display:"flex",alignItems:"center",justifyContent:"center"}}>
+        <img src={LOGO} alt="B&T" style={{height:38,filter:"brightness(0) invert(1)"}}/>
+      </div>
+      <p style={{color:A.dim,fontSize:13}}>Caricamento…</p>
     </div>
   );
 };
