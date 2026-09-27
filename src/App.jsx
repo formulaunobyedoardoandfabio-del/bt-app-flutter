@@ -41,9 +41,9 @@ const EMAILJS = {
 // Premium: 2,99€/mese — gestito su Firebase + Stripe (o Play Billing)
 // ── ID ADMOB REALI ──
 const ADMOB_APP_ID     = "ca-app-pub-5787516371588469~8054706643";
-const ADMOB_BANNER_ID  = "ca-app-pub-5787516371588469/9706030785"; // banner nella Home, tra le news
+const ADMOB_BANNER_ID  = "ca-app-pub-5787516371588469/2997561321"; // banner nella Home, tra le news ("Banner nelle News" su AdMob)
 const ADMOB_REWARD_ID  = "ca-app-pub-5787516371588469/6784763097";
-const ADMOB_ADAPTIVE_BANNER_ID = "ca-app-pub-5787516371588469/9774488555"; // banner adattivo, in fondo alla classifica
+const ADMOB_ADAPTIVE_BANNER_ID = "ca-app-pub-5787516371588469/3821223256"; // banner adattivo, in fondo alla classifica ("Pubblicità Banner" su AdMob)
 // Altezza riservata per il banner AdMob nativo (standard BANNER = 50dp + margine di sicurezza).
 // Serve per spostare su la Nav in basso e non far coprire i tab dal banner nativo.
 const AD_BANNER_H = 60;
