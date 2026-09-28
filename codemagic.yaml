@@ -77,3 +77,48 @@ workflows:
       email:
         recipients:
           - formulaunobyedoardoandfabio@gmail.com
+
+  # 3) Da lanciare UNA VOLTA SOLA: crea la chiave di firma (upload key) per il
+  #    Play Store direttamente sulla macchina di Codemagic. Nessuna password nel
+  #    repository: viene generata a caso durante la build e salvata, insieme al
+  #    file della chiave, solo negli artefatti di questa build (visibili solo
+  #    nel tuo account Codemagic). Nessuna email con allegati.
+  crea-chiave:
+    name: B&T - Crea chiave di firma (una volta sola)
+    max_build_duration: 10
+    environment:
+      <<: *env
+    scripts:
+      - name: Genera la chiave di firma per il Play Store
+        script: |
+          set -e
+          mkdir -p chiave
+          KT=keytool
+          if [ -n "$JAVA_HOME" ] && [ -x "$JAVA_HOME/bin/keytool" ]; then KT="$JAVA_HOME/bin/keytool"; fi
+          PASS=$(openssl rand -base64 48 | LC_ALL=C tr -dc 'A-Za-z0-9' | head -c 24)
+          "$KT" -genkeypair -noprompt \
+            -keystore chiave/bt-upload-key.jks -storetype JKS \
+            -storepass "$PASS" -keypass "$PASS" \
+            -alias bt_upload -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=BT App, O=BT, C=IT"
+          cat > chiave/LEGGIMI-dati-chiave.txt <<EOF
+          CHIAVE DI FIRMA DI B&T APP - CONSERVALA CON CURA
+
+          File della chiave:                     bt-upload-key.jks
+          Keystore password:                     $PASS
+          Key alias:                             bt_upload
+          Key password:                          $PASS
+          Reference name da usare su Codemagic:  bt_keystore
+
+          COSA FARE
+          1. Codemagic -> Settings -> Code signing identities -> Android keystores:
+             carica bt-upload-key.jks e compila i campi con i dati qui sopra.
+          2. Salva una copia di questo file e di bt-upload-key.jks in un posto
+             sicuro e privato (per esempio una cartella di Google Drive solo tua).
+             Serviranno per ogni aggiornamento dell'app sul Play Store.
+          3. Non condividerli con nessuno e non caricarli su GitHub.
+          EOF
+          echo "Chiave creata: scarica i due file negli artefatti di questa build."
+    artifacts:
+      - chiave/bt-upload-key.jks
+      - chiave/LEGGIMI-dati-chiave.txt

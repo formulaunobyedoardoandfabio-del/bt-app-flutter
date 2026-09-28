@@ -3,7 +3,7 @@
   "description": "Backend pagamenti Stripe + ChatGPT per B&T (Vercel Functions)",
   "private": true,
   "engines": {
-    "node": "20"
+    "node": "22.x"
   },
   "dependencies": {
     "firebase-admin": "^12.6.0",

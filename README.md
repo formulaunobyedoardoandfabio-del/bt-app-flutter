@@ -6,6 +6,15 @@ App React + Capacitor (Android) con Firebase, AdMob e dati live OpenF1.
 - **B&T - APK di prova**: crea un APK da installare sul telefono.
 - **B&T - Play Store (AAB firmato)**: crea il file .aab per Google Play.
   Richiede un keystore caricato su Codemagic con nome `bt_keystore`.
+- **B&T - Crea chiave di firma (una volta sola)**: crea quel keystore.
+  1. Avvia questa build su Codemagic e, a fine build, scarica i due file
+     negli artefatti: `bt-upload-key.jks` e `LEGGIMI-dati-chiave.txt`.
+  2. Codemagic → **Settings → Code signing identities → Android keystores**:
+     carica `bt-upload-key.jks` con password e alias scritti nel file
+     LEGGIMI, e come *Reference name* scrivi `bt_keystore`.
+  3. Salva una copia dei due file in un posto sicuro e privato: servono per
+     ogni aggiornamento dell'app sul Play Store. Non lanciare di nuovo questa
+     build dopo aver caricato la chiave: ne creerebbe una diversa.
 
 `public/app-ads.txt` va pubblicato sul sito indicato nella scheda Play Store.
 
@@ -30,7 +39,7 @@ premere "Start new build". Se preferisci continuare a farlo a mano, va bene
 lo stesso: questo passaggio è facoltativo.
 
 ## Pagamenti Premium (Stripe)
-Il backend dei pagamenti reali è in `functions/` (Firebase Cloud Functions).
+Il backend dei pagamenti reali è in `functions/` (Vercel Functions).
 Il codice è pronto, ma il deploy iniziale (account Stripe, chiavi, webhook)
 va fatto una volta sola a mano: istruzioni passo-passo in
 `functions/README.md`.

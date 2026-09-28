@@ -33,12 +33,21 @@ Il repository `bt-app-flutter` è già importato su Vercel. Da controllare una
 volta sola nelle impostazioni del progetto:
 
 1. **Settings → General → Root Directory** → `functions`
-2. **Settings → Environment Variables**, aggiungi:
+2. **Settings → Build and Deployment → Framework Preset** → `Other`, e lascia
+   vuoti (senza override) Build Command e Output Directory. Se è rimasto
+   `Create React App` (Vercel lo sceglie da solo all'importazione, perché nella
+   cartella principale c'è l'app React), Vercel prova a costruire un'app React
+   dentro `functions`, dove non c'è, e il deploy fallisce con "project or build
+   error".
+3. **Settings → Build and Deployment → Node.js Version** → `22.x` (è già
+   indicata anche in `package.json`; dal 1° ottobre 2026 Vercel non accetta
+   più Node.js 20 per i nuovi deploy).
+4. **Settings → Environment Variables**, aggiungi:
    - `STRIPE_SECRET` — la Chiave segreta di Stripe
-   - `STRIPE_WEBHOOK_SECRET` — vedi punto 4 qui sotto
+   - `STRIPE_WEBHOOK_SECRET` — vedi la sezione 4 qui sotto
    - `OPENAI_API_KEY` — la tua chiave da
      [platform.openai.com/api-keys](https://platform.openai.com/api-keys)
-   - `FIREBASE_SERVICE_ACCOUNT` — vedi punto 3 qui sotto
+   - `FIREBASE_SERVICE_ACCOUNT` — vedi la sezione 3 qui sotto
 
 ## 3. Chiave per far parlare Vercel con lo stesso database dell'app
 
@@ -46,7 +55,7 @@ volta sola nelle impostazioni del progetto:
 2. **Genera nuova chiave privata** → scarica il file `.json`
 3. Apri il file, copia **tutto** il contenuto (comprese le graffe)
 4. Incollalo come valore della variabile `FIREBASE_SERVICE_ACCOUNT` su Vercel
-   (punto 2 qui sopra) — su una riga sola va bene, Vercel accetta testo lungo
+   (sezione 2, punto 4) — su una riga sola va bene, Vercel accetta testo lungo
 
 Questo passaggio non richiede il piano Blaze: le service account key sono una
 funzione base di Firebase, disponibile sul piano gratuito.
@@ -62,7 +71,7 @@ funzione base di Firebase, disponibile sul piano gratuito.
    `customer.subscription.deleted`, `invoice.payment_failed`.
 6. Salva, copia il **Signing secret** (`whsec_...`) mostrato da Stripe.
 7. Incollalo come valore della variabile `STRIPE_WEBHOOK_SECRET` su Vercel
-   (punto 2 qui sopra).
+   (sezione 2, punto 4).
 
 ## 5. Prova un pagamento
 
