@@ -1,0 +1,4 @@
+# Sito pubblico di B&T App (GitHub Pages dalla cartella docs/).
+# Pubblica solo le pagine per il Play Store; i documenti di lavoro restano fuori.
+exclude:
+  - superpowers

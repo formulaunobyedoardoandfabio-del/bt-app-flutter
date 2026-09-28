@@ -18,6 +18,28 @@ App React + Capacitor (Android) con Firebase, AdMob e dati live OpenF1.
 
 `public/app-ads.txt` va pubblicato sul sito indicato nella scheda Play Store.
 
+## Pagine pubbliche per il Play Store (privacy)
+La privacy policy e la pagina per chiedere l'eliminazione dell'account sono in
+`docs/` e si pubblicano gratis con GitHub Pages:
+- https://formulaunobyedoardoandfabio-del.github.io/bt-app-flutter/privacy.html
+- https://formulaunobyedoardoandfabio-del.github.io/bt-app-flutter/elimina-account.html
+
+Da attivare una volta sola: GitHub → repository → **Settings → Pages** →
+*Source*: **Deploy from a branch** → branch **main**, cartella **/docs** →
+**Save**. Dopo qualche minuto i link funzionano (anche quelli dentro l'app).
+
+## Consenso per la pubblicità (Unione Europea)
+Prima di mostrare annunci l'app chiede il consenso con il messaggio certificato
+di Google. Il messaggio va creato una volta sola su AdMob → **Privacy e
+messaggi** → **Regolamenti europei** → crea il messaggio per B&T App (come link
+alla privacy usa quello qui sopra) e **pubblicalo**. Finché non è pubblicato,
+agli utenti europei gli annunci non vengono mostrati.
+
+## Moderazione della chat
+Gli utenti possono segnalare messaggi e bloccare altri utenti (tasto ⋯ su ogni
+messaggio). Le segnalazioni si gestiscono nel pannello admin → scheda **CHAT**:
+elimina il messaggio, ignora la segnalazione o sospendi l'utente.
+
 ## Build automatica a ogni correzione (facoltativo, una tantum)
 Il workflow "B&T - APK di prova" è già configurato per partire da solo a ogni
 push su `main`. Manca solo collegare il webhook su GitHub (5 minuti, una

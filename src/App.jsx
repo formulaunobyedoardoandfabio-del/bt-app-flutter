@@ -44,9 +44,11 @@ const ADMOB_APP_ID     = "ca-app-pub-5787516371588469~8054706643";
 const ADMOB_BANNER_ID  = "ca-app-pub-5787516371588469/2997561321"; // banner nella Home, tra le news ("Banner nelle News" su AdMob)
 const ADMOB_REWARD_ID  = "ca-app-pub-5787516371588469/6784763097";
 const ADMOB_ADAPTIVE_BANNER_ID = "ca-app-pub-5787516371588469/3821223256"; // banner adattivo, in fondo alla classifica ("Pubblicità Banner" su AdMob)
-// Altezza riservata per il banner AdMob nativo (standard BANNER = 50dp + margine di sicurezza).
-// Serve per spostare su la Nav in basso e non far coprire i tab dal banner nativo.
-const AD_BANNER_H = 60;
+// Spazio vuoto tra le schede in basso e il banner nativo: AdMob sconsiglia i banner a
+// contatto con i pulsanti di navigazione perché causano clic accidentali, che possono
+// portare alla sospensione degli annunci. L'altezza vera del banner la comunica AdMob
+// (vedi bannerBus più sotto), qui c'è solo il distacco.
+const AD_GAP = 10;
 // Funzioni backend su Vercel (vedi cartella functions/ per il codice e
 // functions/README.md per le istruzioni di deploy) che gestiscono i
 // pagamenti reali con Stripe e la generazione articoli via OpenAI. Le
@@ -63,6 +65,51 @@ const PREMIUM_ANNUAL = "24,99€/anno";
 const PAYMENTS_ENABLED = false;
 // Dicitura richiesta dalle linee guida di Formula 1 per i progetti dei tifosi.
 const F1_DISCLAIMER = "B&T App è un'app non ufficiale e non è associata in alcun modo alle società di Formula 1. F1, FORMULA ONE, FORMULA 1, FIA FORMULA ONE WORLD CHAMPIONSHIP, GRAND PRIX e i marchi correlati sono marchi di Formula One Licensing B.V.";
+
+// ── PRIVACY E CONTATTI ──
+// Pagine pubbliche richieste da Google Play (privacy policy e richiesta di
+// eliminazione dell'account): sono in docs/ nel repository, pubblicate con GitHub Pages.
+const SITE_URL = "https://formulaunobyedoardoandfabio-del.github.io/bt-app-flutter";
+const PRIVACY_URL = SITE_URL + "/privacy.html";
+const DELETE_ACCOUNT_URL = SITE_URL + "/elimina-account.html";
+const CONTACT_EMAIL = "formulaunobyedoardoandfabio@gmail.com";
+// Apre un link fuori dall'app: nell'APK con il browser di sistema (plugin Browser),
+// sul web in una nuova scheda.
+const openUrl = url => {
+  try {
+    const B = window.Capacitor?.Plugins?.Browser;
+    if (window.Capacitor?.isNativePlatform?.() && B) { B.open({ url }); return; }
+  } catch {}
+  window.open(url, "_blank");
+};
+
+// ── MODERAZIONE CHAT ──
+// Google Play chiede, nelle app dove gli utenti si scrivono, di poter segnalare
+// messaggi, bloccare utenti e far intervenire un moderatore.
+const CHAT_REPORTS_KEY = "bt-chat-reports"; // condiviso: segnalazioni da controllare nel pannello admin
+const CHAT_BANNED_KEY = "bt-chat-banned";   // condiviso: utenti sospesi dalla chat
+const BLOCKED_KEY = "bt-blocked";           // solo su questo telefono: utenti che non voglio più vedere
+// ID autore anonimo e stabile (impronta dell'email): serve a bloccare e moderare
+// senza mettere l'email nei messaggi, che tutti gli utenti possono leggere.
+const authorId = email => {
+  const s = String(email || "").toLowerCase().trim();
+  let h1 = 0x811c9dc5, h2 = 0x9747b28c;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    h1 = Math.imul(h1 ^ c, 16777619) >>> 0;
+    h2 = Math.imul(h2 ^ c, 2246822519) >>> 0;
+  }
+  return "u" + h1.toString(16).padStart(8, "0") + h2.toString(16).padStart(8, "0");
+};
+// Stesso autore? ID con ID; il nome si usa solo quando mancano entrambi gli ID (messaggi
+// vecchi), così un omonimo non viene mai scambiato per un altro utente.
+const sameAuthor = (a, m) => {
+  if (!a || !m) return false;
+  const x = a.aid || "", y = m.aid || "";
+  if (x && y) return x === y;
+  if (!x && !y) return (a.name || a.user) === (m.user || m.name);
+  return false;
+};
 
 
 // Feature gating: quali sezioni richiedono premium
@@ -223,6 +270,63 @@ async function dbDelete(collection, docId) {
   }
 }
 
+// Liste condivise (chat, segnalazioni, sospensioni) per le operazioni che non devono
+// sbagliare. A differenza di ss/sg non nascondono gli errori, e su Firestore usano
+// operazioni atomiche: aggiungere un messaggio non riscrive più l'intera lista, che
+// poteva far ricomparire messaggi appena cancellati dal moderatore.
+const listOf = v => Array.isArray(v) ? v : ((v && Array.isArray(v.__arr)) ? v.__arr : []);
+async function sharedAppend(k, item) {
+  const db = await getDb();
+  if (!db) { const arr = listOf(JSON.parse(localStorage.getItem("bt_" + k) || "[]")); arr.push(item); localStorage.setItem("bt_" + k, JSON.stringify(arr)); return; }
+  await db.collection("shared").doc(k).set({ __arr: window.firebase.firestore.FieldValue.arrayUnion(JSON.parse(JSON.stringify(item))) }, { merge: true });
+}
+// Toglie dalla lista gli elementi per cui drop(x) è vero.
+async function sharedRemoveWhere(k, drop) {
+  const db = await getDb();
+  if (!db) {
+    const raw = localStorage.getItem("bt_" + k); if (!raw) return;
+    const arr = listOf(JSON.parse(raw)); const next = arr.filter(x => !drop(x));
+    if (next.length !== arr.length) localStorage.setItem("bt_" + k, JSON.stringify(next));
+    return;
+  }
+  const ref = db.collection("shared").doc(k);
+  await db.runTransaction(async tx => {
+    const snap = await tx.get(ref); if (!snap.exists) return;
+    const arr = listOf(snap.data()); const next = arr.filter(x => !drop(x));
+    if (next.length !== arr.length) tx.set(ref, { __arr: next }, { merge: true });
+  });
+}
+// Email degli account con questo nome (al massimo 2: basta a sapere se è unico).
+async function emailsWithName(name) {
+  const db = await getDb();
+  if (db) { const snap = await db.collection("users").where("name", "==", name).limit(2).get(); return snap.docs.map(d => (d.data() || {}).email || d.id); }
+  const out = [];
+  for (const k of Object.keys(localStorage)) {
+    if (!k.startsWith("bt_users__")) continue;
+    const v = JSON.parse(localStorage.getItem(k) || "null");
+    if (v && v.name === name) out.push(v.email || k.slice(10));
+  }
+  return out.slice(0, 2);
+}
+
+// Feedback inviati da un utente (documenti "bt-feedback-<id>" con user = email):
+// servono all'eliminazione dell'account.
+async function deleteUserFeedback(email) {
+  const db = await getDb();
+  if (db) {
+    const snap = await db.collection("shared").where("user", "==", email).get();
+    await Promise.all(snap.docs.filter(d => d.id.startsWith("bt-feedback-")).map(d => d.ref.delete()));
+    return;
+  }
+  try {
+    for (const k of Object.keys(localStorage)) {
+      if (!k.startsWith("bt_bt-feedback-")) continue;
+      const v = JSON.parse(localStorage.getItem(k) || "null");
+      if (v && v.user === email) localStorage.removeItem(k);
+    }
+  } catch {}
+}
+
 async function dbGetAll(collection) {
   const db = await getDb();
   if (db) {
@@ -355,11 +459,11 @@ const NotifCenter=({notifs,onClose,onMarkRead})=>{
     </div>
   );
 };
-const Nav=({p,set,adOffset=0})=>{
+const Nav=({p,set,adOffset=0,adGap=0})=>{
   const T=[{id:"home",l:"HOME",i:<Home size={20}/>},{id:"instagram",l:"INSTAGRAM",i:<span style={{fontSize:19}}>📷</span>},{id:"chat",l:"CHAT",i:<MessageSquare size={20}/>},{id:"fanta",l:"FANTA",i:<Trophy size={20}/>},{id:"live",l:"RACE",i:<span style={{fontSize:19}}>🛞</span>}];
-  // adOffset: quando il banner AdMob nativo è attivo, la Nav si sposta su di quell'altezza
-  // così il banner (ancorato in basso da Android) non copre più i pulsanti delle schede.
-  return <div style={{display:"flex",position:"fixed",bottom:`calc(${adOffset}px + var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px)))`,left:0,right:0,maxWidth:430,margin:"0 auto",background:A.bg,borderTop:`1px solid ${A.border}`,zIndex:50}}>{T.map(t=><button key={t.id} onClick={()=>set(t.id)} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:3,border:"none",background:"transparent",cursor:"pointer",padding:"8px 0",color:p===t.id?A.red:A.dim}}>{t.i}<span style={{fontSize:9,fontWeight:700}}>{t.l}</span></button>)}</div>;
+  // adOffset: altezza del banner AdMob nativo (ancorato in basso da Android): la Nav sale
+  // di tanto così il banner non copre i pulsanti. adGap: striscia vuota tra pulsanti e banner.
+  return <div style={{display:"flex",position:"fixed",bottom:`calc(${adOffset}px + var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px)))`,left:0,right:0,maxWidth:430,margin:"0 auto",background:A.bg,borderTop:`1px solid ${A.border}`,paddingBottom:adGap,zIndex:50}}>{T.map(t=><button key={t.id} onClick={()=>set(t.id)} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:3,border:"none",background:"transparent",cursor:"pointer",padding:"8px 0",color:p===t.id?A.red:A.dim}}>{t.i}<span style={{fontSize:9,fontWeight:700}}>{t.l}</span></button>)}</div>;
 };
 const Inp=({ph,val,chg,type="text",s,rows})=>rows
   ?<textarea placeholder={ph} value={val} onChange={chg} rows={rows} style={{background:A.card,border:`1px solid ${A.border}`,borderRadius:10,padding:"11px 13px",color:A.text,fontSize:14,width:"100%",outline:"none",resize:"vertical",fontFamily:"inherit",...s}}/>
@@ -421,52 +525,50 @@ const RadioItem=({msg,highlight})=>{
 
 // AD MODAL
 const AdModal=({onClose,onDone,feature})=>{
-  const [s,setS]=useState(15);
-  const [adReady,setAdReady]=useState(false);
-  const [isNativeAd,setIsNativeAd]=useState(false);
+  // "loading": preparo e mostro il video vero di AdMob
+  // "none":    nessun video disponibile (niente rete, nessun annuncio, versione web)
+  // "early":   il video è stato chiuso prima della fine
+  const [phase,setPhase]=useState("loading");
+  const cancelled=useRef(false);
   const featureNames={
     "live-basic":"dati live base","live-tire":"usura gomme","live-lap":"tempi su giro",
     "live-pit":"pit stop","live-radio":"team radio","live-all":"tutti i dati live",fanta:"anteprima Fanta F1",
   };
+  const fname=featureNames[feature]||feature||"la funzione";
 
-  useEffect(()=>{
-    const isNative = typeof window!=="undefined" &&
-      window.Capacitor?.isNativePlatform?.();
-
-    if(isNative){
-      // ── APK: usa Rewarded Video AdMob reale ──
-      setIsNativeAd(true);
-      (async()=>{
-        try{
-          const { AdMob } = { AdMob: window.Capacitor?.Plugins?.AdMob };
-          if(!AdMob){ startCountdown(); return; }
-          await AdMob.initialize({ requestTrackingAuthorization: true });
-          await AdMob.prepareRewardVideoAd({ adId: ADMOB_REWARD_ID, isTesting: false });
-          setAdReady(true);
-          // Mostra il video premiato
-          const result = await AdMob.showRewardVideoAd();
-          if(result){ onDone(); } else { onClose(); } // premio ottenuto
-        }catch(e){ startCountdown(); } // fallback al countdown
-      })();
-    } else {
-      // ── Web: countdown simulato ──
-      startCountdown();
-    }
-  },[]);
-
-  const startCountdown = ()=>{
-    setIsNativeAd(false);
-    const interval = setInterval(()=>{
-      setS(prev=>{ if(prev<=1){ clearInterval(interval); return 0; } return prev-1; });
-    },1000);
+  // Solo video veri. Il premio arriva dall'evento "onRewardedVideoAdReward" del plugin:
+  // se il video viene chiuso prima (evento "Dismissed" senza premio) non si sblocca.
+  // Se non c'è nessun video disponibile lo diciamo chiaramente e sblocchiamo lo stesso:
+  // non è colpa dell'utente e non mostriamo mai una pubblicità finta.
+  const run=async()=>{
+    setPhase("loading");
+    const AdMob=admobPlugin();
+    if(!AdMob||!isNativeApp()||!(await admobReady())){setPhase("none");return;}
+    const hs=[];
+    const drop=()=>hs.splice(0).forEach(h=>{try{h.remove();}catch{}});
+    let rewarded=false,dismissed=false,decided=false;
+    const decide=()=>{if(decided)return;decided=true;drop();if(rewarded)onDone();else setPhase("early");};
+    const onReward=()=>{rewarded=true;if(dismissed)decide();};
+    try{
+      hs.push(await AdMob.addListener("onRewardedVideoAdReward",onReward));
+      // Alcuni annunci comunicano il premio un attimo dopo la chiusura: aspettiamo un po' prima di dire "interrotto".
+      hs.push(await AdMob.addListener("onRewardedVideoAdDismissed",()=>{dismissed=true;if(rewarded)decide();else setTimeout(decide,700);}));
+      hs.push(await AdMob.addListener("onRewardedVideoAdFailedToShow",()=>{if(decided)return;decided=true;drop();setPhase("none");}));
+      await AdMob.prepareRewardVideoAd({ adId: ADMOB_REWARD_ID, isTesting: false });
+      if(cancelled.current){drop();return;}
+      // La promessa si risolve solo quando il premio è guadagnato.
+      AdMob.showRewardVideoAd().then(onReward).catch(()=>{if(decided)return;decided=true;drop();setPhase("none");});
+    }catch(e){drop();setPhase("none");}
   };
+  useEffect(()=>{run();},[]);
 
-  if(isNativeAd&&!adReady) return(
+  if(phase==="loading") return(
     <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.95)",zIndex:300,
       display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:16}}>
       <div style={{width:52,height:52,border:`3px solid ${A.red}`,borderTopColor:"transparent",
         borderRadius:"50%",animation:"spin 1s linear infinite"}}/>
       <p style={{color:A.muted,fontSize:14}}>Caricamento annuncio…</p>
+      <button onClick={()=>{cancelled.current=true;onClose();}} style={{background:"transparent",border:`1px solid ${A.border}`,borderRadius:8,padding:"7px 16px",color:A.muted,fontSize:12,cursor:"pointer"}}>Annulla</button>
       <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
     </div>
   );
@@ -474,34 +576,23 @@ const AdModal=({onClose,onDone,feature})=>{
   return(
     <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.93)",zIndex:300,
       display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
-      <div style={{background:A.card,borderRadius:14,width:"100%",maxWidth:380,padding:22,position:"relative"}}>
-        <button onClick={onClose} style={{position:"absolute",top:12,right:12,background:A.card2,
+      <div style={{background:A.card,borderRadius:14,width:"100%",maxWidth:380,padding:22,position:"relative",textAlign:"center"}}>
+        <button onClick={onClose} aria-label="Chiudi" style={{position:"absolute",top:12,right:12,background:A.card2,
           border:"none",borderRadius:8,padding:6,cursor:"pointer",color:A.text}}><X size={16}/></button>
-        <h3 style={{fontWeight:900,fontStyle:"italic",textAlign:"center",fontSize:16,marginBottom:4,color:A.text}}>
-          VIDEO SPONSORIZZATO
-        </h3>
-        {feature&&<p style={{textAlign:"center",color:A.red,fontSize:12,fontWeight:700,marginBottom:14}}>
-          🔓 Stai sbloccando: {featureNames[feature]||feature}
-        </p>}
-        <div style={{borderRadius:10,aspectRatio:"16/9",position:"relative",overflow:"hidden",
-          marginBottom:14,backgroundImage:`url(${GP})`,backgroundSize:"cover",backgroundPosition:"center"}}>
-          <div style={{position:"absolute",inset:0,background:"rgba(0,0,0,.3)",
-            display:"flex",alignItems:"center",justifyContent:"center"}}>
-            <div style={{width:52,height:52,borderRadius:"50%",background:"rgba(255,255,255,.2)",
-              display:"flex",alignItems:"center",justifyContent:"center"}}>
-              <Play size={24} color="#fff" fill="#fff"/>
-            </div>
-          </div>
-          <span style={{position:"absolute",top:8,left:8,background:"rgba(0,0,0,.7)",
-            borderRadius:4,padding:"2px 8px",fontSize:11,color:"#fff"}}>Pubblicità</span>
-          {s>0&&<span style={{position:"absolute",top:8,right:8,background:"rgba(0,0,0,.7)",
-            borderRadius:4,padding:"2px 8px",fontSize:11,color:"#fff"}}>{s}s</span>}
-        </div>
-        <p style={{textAlign:"center",color:A.muted,fontSize:13,marginBottom:16}}>
-          {s>0?`Premio disponibile tra ${s}s…`:"✅ Visione completata!"}
-        </p>
-        <Btn ch={s>0?<><Gift size={16}/> ATTENDI…</>:<><Gift size={16}/> SBLOCCA FUNZIONE</>}
-          onClick={s===0?onDone:undefined} dis={s>0}/>
+        {phase==="none"?<>
+          <h3 style={{fontWeight:900,fontStyle:"italic",fontSize:16,marginBottom:10,color:A.text}}>NESSUN VIDEO DISPONIBILE</h3>
+          <p style={{color:A.muted,fontSize:13,lineHeight:1.6,marginBottom:18}}>
+            Nessun video disponibile in questo momento: {fname} te lo sblocchiamo lo stesso. 🎁
+          </p>
+          <Btn ch={<><Gift size={16}/> CONTINUA</>} onClick={onDone}/>
+        </>:<>
+          <h3 style={{fontWeight:900,fontStyle:"italic",fontSize:16,marginBottom:10,color:A.text}}>VIDEO INTERROTTO</h3>
+          <p style={{color:A.muted,fontSize:13,lineHeight:1.6,marginBottom:18}}>
+            Il video è stato chiuso prima della fine. Per sbloccare {fname} guardalo fino in fondo.
+          </p>
+          <Btn ch={<><Play size={16}/> RIPROVA</>} onClick={run} s={{marginBottom:10}}/>
+          <Btn ch="CHIUDI" onClick={onClose} out/>
+        </>}
       </div>
     </div>
   );
@@ -515,7 +606,7 @@ const AuthModal=({onClose,onLogin})=>{
   const clrE=()=>{setErr("");setOk("");};
   const login=async()=>{if(!email||!pw){setErr("Compila tutti i campi");return;}try{const u=await dbGet("users",email.toLowerCase().trim());if(!u){setErr("Account non trovato");return;}if(u.pw!==pw){setErr("Password errata");return;}await dbSet("sessions","current",{email:u.email,name:u.name,nick:u.nick,isPremium:u.isPremium||false});onLogin(u);}catch(e){console.error("login error:",e);setErr("Errore di connessione, riprova tra poco");}};
   const reg=async()=>{if(!name||!email||!pw||!pw2){setErr("Compila tutti i campi");return;}if(pw!==pw2){setErr("Le password non coincidono");return;}if(pw.length<6){setErr("Password min. 6 caratteri");return;}const ek=email.toLowerCase().trim();try{if(await dbGet("users",ek)){setErr("Email già registrata");return;}const u={name,nick:name,email:ek,pw,isPremium:false,premium:false,notif:{news:true,live:true,fanta:true},ts:Date.now(),plan:"free"};await dbSet("users",ek,u);await dbSet("sessions","current",{email:u.email,name:u.name,nick:u.nick,isPremium:u.isPremium||false});onLogin(u);}catch(e){console.error("reg error:",e);setErr("Errore di connessione, riprova tra poco");}};
-  const sendReset=async()=>{if(!email){setErr("Inserisci la tua email");return;}const ek=email.toLowerCase().trim();try{const u=await dbGet("users",ek);if(!u){setErr("Email non trovata");return;}const rc=mkCode();await dbSet("resets",ek,{code:rc,exp:Date.now()+600000});const sent=await sendResetEmail(ek,u.name,rc);setOk(sent&&EMAILJS.publicKey?"📧 Email inviata! Controlla la casella.":("📧 Codice: "+rc+"\n(invio email non riuscito, usa questo codice per continuare)"));setMode("verify");}catch(e){console.error("sendReset error:",e);setErr("Errore di connessione, riprova tra poco. Se persiste, controlla le regole Firestore per la collezione \"resets\".");}};
+  const sendReset=async()=>{if(!email){setErr("Inserisci la tua email");return;}const ek=email.toLowerCase().trim();try{const u=await dbGet("users",ek);if(!u){setErr("Email non trovata");return;}const rc=mkCode();await dbSet("resets",ek,{code:rc,exp:Date.now()+600000});const sent=await sendResetEmail(ek,u.name,rc);if(!sent){await dbDelete("resets",ek);setErr(`Non siamo riusciti a inviare l'email con il codice. Riprova tra qualche minuto o scrivici a ${CONTACT_EMAIL}.`);return;}setOk("📧 Email inviata! Controlla la casella.");setMode("verify");}catch(e){console.error("sendReset error:",e);setErr("Errore di connessione, riprova tra poco. Se persiste, controlla le regole Firestore per la collezione \"resets\".");}};
   const verify=async()=>{if(code.length!==6){setErr("Codice a 6 cifre");return;}try{const st=await dbGet("resets",email.toLowerCase().trim());if(!st||st.code!==code||Date.now()>st.exp){setErr("Codice non valido o scaduto");return;}setMode("newpw");setErr("");}catch(e){console.error("verify error:",e);setErr("Errore di connessione, riprova tra poco");}};
   const newPw=async()=>{if(!pw||!pw2||pw!==pw2||pw.length<6){setErr("Password non valida");return;}const ek=email.toLowerCase().trim();try{const u=await dbGet("users",ek);if(!u)return;await dbSet("users",ek,{...u,pw});await dbDelete("resets",ek);setOk("✅ Password aggiornata! Ora puoi accedere.");setTimeout(()=>setMode("login"),1500);}catch(e){console.error("newPw error:",e);setErr("Errore di connessione, riprova tra poco");}};
   return(
@@ -541,7 +632,7 @@ const AuthModal=({onClose,onLogin})=>{
 const Gate=({user,onAuth,msg,ch})=>{if(user)return ch;return(<div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",minHeight:"50vh",padding:24,textAlign:"center"}}><Lock size={42} color={A.red} style={{marginBottom:16}}/><h3 style={{fontWeight:900,fontStyle:"italic",fontSize:17,color:A.text,marginBottom:8}}>Contenuto riservato</h3><p style={{color:A.muted,fontSize:13,lineHeight:1.65,marginBottom:22}}>{msg||"Accedi per usare questa funzione"}</p><Btn ch="ACCEDI O REGISTRATI" onClick={onAuth} s={{maxWidth:300}}/></div>);};
 
 // ══════ LIVE PAGE (componente principale) ══════
-const LivePage=({races,piloti,costruttori,isPremium,unlocked,onAd,user,onAuth,onUpgrade})=>{
+const LivePage=({races,piloti,costruttori,isPremium,unlocked,onAd,user,onAuth,onUpgrade,adsOff})=>{
   const [stab,setStab]=useState("PILOTI");
   const [liveTab,setLiveTab]=useState("GARA");
   const [cnt,setCnt]=useState(null);
@@ -860,13 +951,13 @@ const LivePage=({races,piloti,costruttori,isPremium,unlocked,onAd,user,onAuth,on
           </div>
         ))}
       </div>
-      <AdMobBanner isPremium={isPremium} adId={ADMOB_ADAPTIVE_BANNER_ID} adSize="ADAPTIVE_BANNER"/>
+      <AdMobBanner isPremium={isPremium||adsOff} adId={ADMOB_ADAPTIVE_BANNER_ID} adSize="ADAPTIVE_BANNER"/>
     </div>
   );
 };
 
 // ── OTHER PAGES (same as before, compact) ──
-const HomePage=({news,setPage,setSN,user,onAuth,isPremium,onUpgrade})=>{
+const HomePage=({news,setPage,setSN,user,onAuth,isPremium,onUpgrade,adsOff})=>{
   const pub=news.filter(n=>n.published).sort((a,b)=>new Date(b.date)-new Date(a.date));
   return(<div style={{padding:"16px 16px 0"}}>
     <div style={{position:"relative",overflow:"hidden",marginBottom:24,borderRadius:16,height:240,backgroundImage:`url(${GP})`,backgroundSize:"cover",backgroundPosition:"center"}}>
@@ -901,7 +992,7 @@ const HomePage=({news,setPage,setSN,user,onAuth,isPremium,onUpgrade})=>{
       </div>);
       })}
     </div>
-    <AdMobBanner isPremium={isPremium}/>
+    <AdMobBanner isPremium={isPremium||adsOff}/>
     {!isPremium&&<div onClick={onUpgrade} style={{background:`linear-gradient(135deg,${A.red}18,${A.red}08)`,border:`1px solid ${A.red}33`,borderRadius:14,margin:"0 16px 16px",padding:"14px 16px",cursor:"pointer",display:"flex",alignItems:"center",gap:12}}><span style={{fontSize:24}}>⭐</span><div style={{flex:1}}><div style={{fontWeight:800,fontSize:13,color:A.red}}>{PAYMENTS_ENABLED?"Passa a B&T Premium":"B&T Premium in arrivo"}</div><div style={{fontSize:12,color:A.muted}}>{PAYMENTS_ENABLED?"Rimuovi le pubblicità + tutti i dati live":"Presto: niente pubblicità + tutti i dati live"}</div></div><span style={{color:A.red,fontSize:18}}>›</span></div>}
     <p style={{color:A.dim,fontSize:10,lineHeight:1.55,textAlign:"center",padding:"4px 16px 64px",margin:0}}>{F1_DISCLAIMER}</p>
   </div>);
@@ -911,7 +1002,9 @@ const IGPage=({ig})=>(<div style={{padding:"16px 16px 88px"}}><div style={{backg
 const CHAT_ROOMS=[{key:"generale",label:"Chat Generale",dbKey:"bt-chat-generale",color:A.red,icon:"msg"},{key:"live",label:"Live Gara",dbKey:"bt-chat-live-gara",color:"#4AE54A",icon:"activity"},{key:"fantaf1",label:"FantaF1 Talk",dbKey:"bt-chat-fantaf1-talk",color:"#E7B34C",icon:"trophy"},{key:"boxradio",label:"Box Radio",dbKey:"bt-chat-boxradio",color:"#2DD4BF",icon:"radio"},{key:"paddock",label:"Paddock Talk",dbKey:"bt-chat-paddocktalk",color:"#4A90E2",icon:"shield"}];
 const chatIcon=(icon,size=22)=>icon==="trophy"?<Trophy size={size} color="#fff"/>:icon==="radio"?<Radio size={size} color="#fff"/>:icon==="shield"?<Shield size={size} color="#fff"/>:icon==="activity"?<Activity size={size} color="#fff"/>:<MessageSquare size={size} color="#fff"/>;
 const chatRelTime=t=>{if(!t)return"";const min=Math.floor((Date.now()-t)/60000);if(min<1)return"ora";if(min<60)return`${min} min`;const h=Math.floor(min/60);if(h<24)return`${h} h`;if(h<48)return"Ieri";const d=new Date(t);return`${d.getDate()}/${d.getMonth()+1}`;};
-const markSeen=(k,n)=>ss("bt-chat-seen-"+k,n,false);
+// "Letti" = orario dell'ultimo messaggio visto (prima era il numero di messaggi, che si
+// sfasava quando il moderatore ne cancellava qualcuno).
+const markSeen=(k,arr)=>ss("bt-chat-seen-"+k,(arr||[]).reduce((mx,m)=>Math.max(mx,m.t||0),0)||Date.now(),false);
 const ChatPage=({races,user,onAuth})=>{
   const live=races.find(r=>r.status==="LIVE");
   const [view,setView]=useState("list");
@@ -919,18 +1012,30 @@ const ChatPage=({races,user,onAuth})=>{
   const [summaries,setSummaries]=useState({});
   const [msgs,setMsgs]=useState([]);
   const [txt,setTxt]=useState("");
+  const [blocked,setBlocked]=useState([]);   // utenti bloccati da me (solo su questo telefono)
+  const [menu,setMenu]=useState(null);       // messaggio su cui ho aperto le opzioni
+  const [toast,setToast]=useState("");
   const endR=useRef(null);
   const dbKey=CHAT_ROOMS.find(r=>r.key===room).dbKey;
+  const myAid=user?authorId(user.email):"";
+  const isMine=m=>m.aid?m.aid===myAid:m.user===user.name;
+  const isBlocked=(m,bl=blocked)=>bl.some(b=>sameAuthor(b,m));
+  const flash=t=>{setToast(t);setTimeout(()=>setToast(""),3500);};
+  useEffect(()=>{(async()=>{setBlocked((await sg(BLOCKED_KEY,false))||[]);})();},[user]);
   useEffect(()=>{
     if(!user||view!=="list")return;
     let stop=false;
     const load=async()=>{
+      const bl=(await sg(BLOCKED_KEY,false))||[];
       const entries=await Promise.all(CHAT_ROOMS.map(async r=>{
         let d=await sg(r.dbKey,true);
         if(!d&&r.key==="generale"){const old=await sg("bt-chat",true);if(old){d=old;await ss(r.dbKey,old,true);}}
         d=d||[];
         const seen=(await sg("bt-chat-seen-"+r.key,false))||0;
-        return [r.key,{last:d[d.length-1]||null,count:d.length,unread:Math.max(0,d.length-seen)}];
+        const vis=d.filter(m=>!isBlocked(m,bl));
+        // seen grande = orario (nuovo formato); piccolo = numero di messaggi (vecchio formato).
+        const unread=seen>1e12?vis.filter(m=>(m.t||0)>seen&&!isMine(m)).length:Math.max(0,d.length-seen);
+        return [r.key,{last:vis[vis.length-1]||null,count:d.length,unread}];
       }));
       if(!stop)setSummaries(Object.fromEntries(entries));
     };
@@ -945,7 +1050,7 @@ const ChatPage=({races,user,onAuth})=>{
     const lm=async()=>{
       let d=await sg(dbKey,true);
       if(!d&&room==="generale"){const old=await sg("bt-chat",true);if(old){d=old;await ss(dbKey,old,true);}}
-      if(!stop&&d){setMsgs(d);markSeen(room,d.length);}
+      if(!stop&&d){setMsgs(d);markSeen(room,d);}
     };
     lm();
     const t=setInterval(lm,4000);
@@ -953,18 +1058,40 @@ const ChatPage=({races,user,onAuth})=>{
   },[view,room,user]);
   useEffect(()=>{endR.current?.scrollIntoView({behavior:"smooth"});},[msgs]);
   const openRoom=k=>{setRoom(k);setView("thread");};
-  const backToList=()=>{markSeen(room,msgs.length);setView("list");};
+  const backToList=()=>{markSeen(room,msgs);setView("list");};
   const send=async()=>{
     if(!txt.trim())return;
-    const m={id:uid(),user:user.name,txt:txt.trim(),t:Date.now()};
+    // Utenti sospesi dal moderatore (pannello admin → CHAT): non possono più scrivere.
+    const banned=(await sg(CHAT_BANNED_KEY,true))||[];
+    if(banned.some(b=>sameAuthor(b,{aid:myAid,user:user.name}))){flash("Non puoi più scrivere in chat: il tuo account è stato sospeso per violazione delle regole.");return;}
+    const m={id:uid(),user:user.name,aid:myAid,txt:txt.trim(),t:Date.now()};
     const u=[...msgs,m];
     setMsgs(u);setTxt("");
-    await ss(dbKey,u,true);
-    markSeen(room,u.length);
+    // Aggiunge solo il nuovo messaggio: non riscrive la lista (che può essere vecchia di qualche secondo).
+    try{await sharedAppend(dbKey,m);}catch(e){setMsgs(msgs);setTxt(m.txt);flash("Messaggio non inviato: controlla la connessione e riprova.");return;}
+    markSeen(room,u);
+  };
+  const report=async m=>{
+    setMenu(null);
+    try{
+      const reps=(await sg(CHAT_REPORTS_KEY,true))||[];
+      if(!reps.some(r=>r.msgId===m.id&&r.byAid===myAid))
+        await sharedAppend(CHAT_REPORTS_KEY,{id:uid(),room,msgId:m.id,txt:m.txt,author:m.user,aid:m.aid||"",by:user.name,byAid:myAid,t:Date.now()});
+      flash("Segnalazione inviata: la controlleremo al più presto. Grazie!");
+    }catch(e){flash("Segnalazione non inviata: controlla la connessione e riprova.");}
+  };
+  const block=async m=>{
+    setMenu(null);
+    const who={aid:m.aid||"",name:m.user};
+    const nb=[...blocked.filter(b=>!sameAuthor(b,m)),who];
+    setBlocked(nb);
+    await ss(BLOCKED_KEY,nb,false);
+    flash(`Non vedrai più i messaggi di ${m.user}. Puoi sbloccarlo dal Profilo.`);
   };
   if(!user)return <Gate user={user} onAuth={onAuth} msg="Registrati per partecipare alla community!"/>;
   if(view==="thread"){
     const r=CHAT_ROOMS.find(x=>x.key===room);
+    const vis=msgs.filter(m=>!isBlocked(m));
     return(<div style={{display:"flex",flexDirection:"column",height:"calc(100vh - 140px)"}}>
       <div style={{display:"flex",alignItems:"center",gap:10,padding:"11px 16px",borderBottom:`1px solid ${A.border}`}}>
         <button onClick={backToList} aria-label="Torna all'elenco chat" style={{background:"transparent",border:"none",cursor:"pointer",color:A.text,display:"flex",padding:4}}><ArrowLeft size={20}/></button>
@@ -973,17 +1100,29 @@ const ChatPage=({races,user,onAuth})=>{
       </div>
       {live&&room==="live"&&<div style={{padding:"9px 16px",background:`${A.red}22`,borderBottom:`1px solid ${A.red}44`,display:"flex",alignItems:"center",gap:8}}><Radio size={13} color={A.red}/><span style={{color:A.red,fontWeight:800,fontStyle:"italic",fontSize:13}}>LIVE: {live.name}</span></div>}
       <div style={{flex:1,overflowY:"auto",padding:"12px 16px",display:"flex",flexDirection:"column",gap:8}}>
-        {msgs.length===0&&<div style={{textAlign:"center",color:A.dim,fontSize:12,marginTop:20}}>Nessun messaggio ancora. Scrivi il primo tu!</div>}
-        {msgs.map(m=><div key={m.id} style={{display:"flex",flexDirection:"column",alignSelf:m.user===user.name?"flex-end":"flex-start",maxWidth:"76%"}}>
-          <span style={{fontSize:10,color:A.muted,marginBottom:2}}>{m.user}</span>
-          <div style={{background:m.user===user.name?A.red:"#2a2a2a",borderRadius:12,padding:"8px 12px"}}><span style={{fontSize:13,color:"#fff"}}>{m.txt}</span></div>
-        </div>)}
+        {vis.length===0&&<div style={{textAlign:"center",color:A.dim,fontSize:12,marginTop:20}}>Nessun messaggio ancora. Scrivi il primo tu!</div>}
+        {vis.map(m=>{const mine=isMine(m);return <div key={m.id} style={{display:"flex",flexDirection:"column",alignSelf:mine?"flex-end":"flex-start",maxWidth:"76%"}}>
+          <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:2,alignSelf:mine?"flex-end":"flex-start"}}>
+            <span style={{fontSize:10,color:A.muted}}>{m.user}</span>
+            {!mine&&<button onClick={()=>setMenu(m)} aria-label={`Opzioni messaggio di ${m.user}`} style={{background:"transparent",border:"none",color:A.dim,cursor:"pointer",fontSize:14,lineHeight:1,padding:"0 4px"}}>⋯</button>}
+          </div>
+          <div style={{background:mine?A.red:"#2a2a2a",borderRadius:12,padding:"8px 12px"}}><span style={{fontSize:13,color:"#fff"}}>{m.txt}</span></div>
+        </div>;})}
         <div ref={endR}/>
       </div>
+      {toast&&<div style={{margin:"0 16px 8px",background:A.card2,border:`1px solid ${A.border}`,borderRadius:10,padding:"9px 12px",fontSize:12,color:A.text,textAlign:"center"}}>{toast}</div>}
       <div style={{padding:"11px 16px",borderTop:`1px solid ${A.border}`,display:"flex",gap:10}}>
         <Inp ph="Scrivi…" val={txt} chg={e=>setTxt(e.target.value)} s={{flex:1}}/>
         <button onClick={send} aria-label="Invia messaggio" style={{background:A.red,border:"none",borderRadius:10,width:44,height:44,flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center",color:"#fff",cursor:"pointer"}}><Send size={18}/></button>
       </div>
+      {menu&&<div onClick={()=>setMenu(null)} style={{position:"fixed",inset:0,background:"rgba(0,0,0,.6)",zIndex:350,display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
+        <div onClick={e=>e.stopPropagation()} style={{background:A.card,borderRadius:"16px 16px 0 0",width:"100%",maxWidth:430,padding:"16px 16px calc(16px + var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px)))",display:"flex",flexDirection:"column",gap:10}}>
+          <div style={{fontSize:12,color:A.muted,textAlign:"center",marginBottom:4,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{menu.user}: “{menu.txt}”</div>
+          <Btn ch="🚩 Segnala messaggio" onClick={()=>report(menu)}/>
+          <Btn ch={`🚫 Blocca ${menu.user}`} onClick={()=>block(menu)} out/>
+          <button onClick={()=>setMenu(null)} style={{background:"transparent",border:"none",color:A.muted,fontSize:13,padding:10,cursor:"pointer"}}>Annulla</button>
+        </div>
+      </div>}
     </div>);
   }
   return(<div style={{padding:"16px 16px 88px"}}>
@@ -994,7 +1133,7 @@ const ChatPage=({races,user,onAuth})=>{
         <span style={{width:48,height:48,borderRadius:"50%",background:r.color,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>{chatIcon(r.icon)}</span>
         <div style={{flex:1,minWidth:0}}>
           <div style={{fontWeight:800,fontStyle:"italic",fontSize:14,color:A.text,marginBottom:3}}>{r.label}</div>
-          <div style={{fontSize:12,color:A.muted,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{s.last?`${s.last.user===user.name?"Tu":s.last.user}: ${s.last.txt}`:"Nessun messaggio ancora"}</div>
+          <div style={{fontSize:12,color:A.muted,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{s.last?`${isMine(s.last)?"Tu":s.last.user}: ${s.last.txt}`:"Nessun messaggio ancora"}</div>
         </div>
         <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:6,flexShrink:0}}>
           <span style={{fontSize:11,color:A.dim}}>{chatRelTime(s.last?.t)}</span>
@@ -1002,10 +1141,12 @@ const ChatPage=({races,user,onAuth})=>{
         </div>
       </button>);
     })}
+    <p style={{fontSize:11,color:A.dim,lineHeight:1.6,textAlign:"center",marginTop:18}}>Rispetta gli altri tifosi: niente insulti, spam o dati personali. Con ⋯ su un messaggio puoi segnalarlo o bloccare chi l'ha scritto.</p>
   </div>);
 };
 const FantaPage=({pilots,isPremium,unlocked,onAd,user,onAuth,onUpgrade})=>{const ok=isPremium||unlocked.has("fanta");if(!user)return <Gate user={user} onAuth={onAuth} msg="Registrati per accedere al Fanta F1!"/>;if(!ok)return(<div style={{display:"flex",alignItems:"center",justifyContent:"center",minHeight:"62vh",padding:24}}><div style={{maxWidth:340,width:"100%",textAlign:"center"}}><Lock size={42} color={A.red} style={{margin:"0 auto 16px"}}/><h2 style={{fontWeight:900,fontStyle:"italic",fontSize:18,color:A.text,marginBottom:10}}>FANTA F1 — IN ARRIVO A BREVE</h2><p style={{color:A.muted,fontSize:13,lineHeight:1.65,marginBottom:20}}>Guarda un breve annuncio per sbloccare l'anteprima.</p><Btn ch={<><Eye size={16}/> GUARDA E SBLOCCA ANTEPRIMA</>} onClick={()=>onAd("fanta")}/></div></div>);return(<div style={{padding:"16px 16px 88px"}}><ST em="🏆" ch="PILOTI DISPONIBILI"/><p style={{color:A.muted,fontSize:12,marginBottom:16}}>Budget: 100M · Scegli 5 piloti</p>{pilots.map(p=><div key={p.id} style={{background:A.card,borderRadius:14,marginBottom:9,padding:"13px 16px",display:"flex",alignItems:"center",justifyContent:"space-between"}}><div><div style={{fontWeight:700,fontSize:13,color:A.text}}>{p.name}</div><div style={{fontSize:11,color:A.muted}}>{p.team}</div></div><div style={{display:"flex",gap:18}}><div style={{textAlign:"center"}}><div style={{fontSize:10,color:A.muted}}>PREZZO</div><div style={{fontWeight:900,color:A.red,fontSize:15}}>{p.price}M</div></div><div style={{textAlign:"center"}}><div style={{fontSize:10,color:A.muted}}>PUNTI</div><div style={{fontWeight:900,color:A.text,fontSize:15}}>{p.points}</div></div></div></div>)}</div>);};
-const ProfilePage=({user,onLogout,onDelete,onAdmin,notif,setNotif,isPremium,onUpgrade,onDowngrade,onAuth,onShowTerms})=>{if(!user)return <Gate user={user} onAuth={onAuth} msg="Accedi per visualizzare il tuo profilo"/>;const ini=(user.name||"??").split(" ").map(w=>w[0]).join("").toUpperCase().slice(0,2);return(<div style={{padding:"16px 16px 88px"}}><div style={{background:A.card,borderRadius:14,padding:"24px 20px",textAlign:"center",marginBottom:14}}><div style={{width:74,height:74,borderRadius:"50%",background:A.red,display:"flex",alignItems:"center",justifyContent:"center",margin:"0 auto 14px",fontWeight:900,fontStyle:"italic",fontSize:26,color:"#fff"}}>{ini}</div><div style={{fontWeight:900,fontStyle:"italic",fontSize:18,color:A.text,marginBottom:2}}>{user.name}</div>{user.nick&&user.nick!==user.name&&<div style={{fontSize:13,color:A.red,fontWeight:600,marginBottom:4}}>@{user.nick}</div>}<div style={{fontSize:13,color:A.muted,marginBottom:20}}>{user.email}</div><Btn ch={<><Shield size={15}/> PANNELLO ADMIN</>} onClick={onAdmin} sm/></div>{!isPremium&&<div style={{background:"linear-gradient(135deg,#181818,#2a1a0a)",border:`1px solid ${A.red}44`,borderRadius:14,padding:16,marginBottom:14}}><div style={{fontWeight:900,fontStyle:"italic",fontSize:14,color:A.red,marginBottom:6}}>⭐ PREMIUM</div><p style={{color:A.muted,fontSize:12,marginBottom:14,lineHeight:1.6}}>Sblocca news esclusive, tutti i dati live (tempi, gomme, pit stop, audio radio), Fanta F1 e nessuna pubblicità.</p><Btn ch={PAYMENTS_ENABLED?`ABBONATI — ${PREMIUM_PRICE}`:"⏳ PREMIUM IN ARRIVO"} onClick={onUpgrade} sm/></div>}{isPremium&&<div style={{background:"linear-gradient(135deg,#0a1a0a,#182818)",border:"1px solid #4AE54A44",borderRadius:14,padding:14,marginBottom:14,display:"flex",alignItems:"center",gap:12}}><span style={{fontSize:24}}>⭐</span><div style={{flex:1}}><div style={{fontWeight:800,color:"#4AE54A",fontSize:13}}>PREMIUM ATTIVO</div><div style={{fontSize:11,color:A.muted}}>Tutti i dati live · No pubblicità</div></div><button onClick={onDowngrade} style={{background:"none",border:`1px solid ${A.dim}`,borderRadius:8,padding:"4px 10px",color:A.dim,fontSize:10,cursor:"pointer"}}>Annulla</button></div>}<div style={{background:A.card,borderRadius:14,padding:"16px 18px",marginBottom:14}}><div style={{display:"flex",alignItems:"center",gap:8,marginBottom:14}}><Bell size={15} color={A.red}/><span style={{fontWeight:900,fontStyle:"italic",fontSize:14,color:A.text}}>NOTIFICHE</span></div>{[{k:"news",l:"Ultime notizie B&T",d:"Nuovi articoli e video"},{k:"live",l:"Allerte gara live",d:"Inizio gara e risultati"},{k:"fanta",l:"Novità Fanta F1",d:"Aggiornamenti punteggi"}].map(it=>(<div key={it.k} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"11px 0",borderBottom:`1px solid ${A.border}`}}><div><div style={{fontSize:14,color:A.text,marginBottom:2}}>{it.l}</div><div style={{fontSize:11,color:A.muted}}>{it.d}</div></div><Tg v={notif[it.k]} chg={v=>setNotif(p=>({...p,[it.k]:v}))}/></div>))}</div><button onClick={onShowTerms} style={{width:"100%",background:"transparent",border:"none",padding:"10px 0",color:A.muted,fontSize:13,cursor:"pointer",textAlign:"center",marginBottom:11}}>Termini e Condizioni</button><Btn ch={<><LogOut size={15}/> ESCI DALL'ACCOUNT</>} onClick={onLogout} out s={{marginBottom:11}}/><button onClick={onDelete} style={{width:"100%",background:"transparent",border:`1px solid ${A.border}`,borderRadius:10,padding:13,color:A.dim,fontSize:13,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",gap:8}}><Trash2 size={14}/> ELIMINA ACCOUNT</button><p style={{color:A.dim,fontSize:10,lineHeight:1.55,textAlign:"center",margin:"18px 4px 0"}}>{F1_DISCLAIMER}</p></div>);};
+const PrivacyLinks=()=>{const st={width:"100%",background:"transparent",border:"none",padding:"8px 0",color:A.muted,fontSize:13,cursor:"pointer",textAlign:"center"};return(<div style={{marginBottom:11}}><button onClick={()=>openUrl(PRIVACY_URL)} style={st}>Privacy Policy</button>{isNativeApp()&&_privacyOptionsRequired&&<button onClick={openPrivacyOptions} style={st}>Preferenze privacy annunci</button>}</div>);};
+const ProfilePage=({user,onLogout,onDelete,onAdmin,notif,setNotif,isPremium,onUpgrade,onDowngrade,onAuth,onShowTerms})=>{const [confirmDel,setConfirmDel]=useState(false);const [deleting,setDeleting]=useState(false);const [blocked,setBlocked]=useState([]);useEffect(()=>{setConfirmDel(false);setDeleting(false);(async()=>setBlocked((await sg(BLOCKED_KEY,false))||[]))();},[user]);const unblock=async b=>{const nb=blocked.filter(x=>x!==b);setBlocked(nb);await ss(BLOCKED_KEY,nb,false);};const confirmDelete=async()=>{if(deleting)return;setDeleting(true);try{await onDelete();}catch(e){console.error("delete error:",e);setDeleting(false);alert("Eliminazione non riuscita, controlla la connessione e riprova.");}};if(!user)return(<div><Gate user={user} onAuth={onAuth} msg="Accedi per visualizzare il tuo profilo"/><div style={{padding:"0 16px 88px"}}><PrivacyLinks/></div></div>);const ini=(user.name||"??").split(" ").map(w=>w[0]).join("").toUpperCase().slice(0,2);return(<div style={{padding:"16px 16px 88px"}}><div style={{background:A.card,borderRadius:14,padding:"24px 20px",textAlign:"center",marginBottom:14}}><div style={{width:74,height:74,borderRadius:"50%",background:A.red,display:"flex",alignItems:"center",justifyContent:"center",margin:"0 auto 14px",fontWeight:900,fontStyle:"italic",fontSize:26,color:"#fff"}}>{ini}</div><div style={{fontWeight:900,fontStyle:"italic",fontSize:18,color:A.text,marginBottom:2}}>{user.name}</div>{user.nick&&user.nick!==user.name&&<div style={{fontSize:13,color:A.red,fontWeight:600,marginBottom:4}}>@{user.nick}</div>}<div style={{fontSize:13,color:A.muted,marginBottom:20}}>{user.email}</div><Btn ch={<><Shield size={15}/> PANNELLO ADMIN</>} onClick={onAdmin} sm/></div>{!isPremium&&<div style={{background:"linear-gradient(135deg,#181818,#2a1a0a)",border:`1px solid ${A.red}44`,borderRadius:14,padding:16,marginBottom:14}}><div style={{fontWeight:900,fontStyle:"italic",fontSize:14,color:A.red,marginBottom:6}}>⭐ PREMIUM</div><p style={{color:A.muted,fontSize:12,marginBottom:14,lineHeight:1.6}}>Sblocca news esclusive, tutti i dati live (tempi, gomme, pit stop, audio radio), Fanta F1 e nessuna pubblicità.</p><Btn ch={PAYMENTS_ENABLED?`ABBONATI — ${PREMIUM_PRICE}`:"⏳ PREMIUM IN ARRIVO"} onClick={onUpgrade} sm/></div>}{isPremium&&<div style={{background:"linear-gradient(135deg,#0a1a0a,#182818)",border:"1px solid #4AE54A44",borderRadius:14,padding:14,marginBottom:14,display:"flex",alignItems:"center",gap:12}}><span style={{fontSize:24}}>⭐</span><div style={{flex:1}}><div style={{fontWeight:800,color:"#4AE54A",fontSize:13}}>PREMIUM ATTIVO</div><div style={{fontSize:11,color:A.muted}}>Tutti i dati live · No pubblicità</div></div><button onClick={onDowngrade} style={{background:"none",border:`1px solid ${A.dim}`,borderRadius:8,padding:"4px 10px",color:A.dim,fontSize:10,cursor:"pointer"}}>Annulla</button></div>}<div style={{background:A.card,borderRadius:14,padding:"16px 18px",marginBottom:14}}><div style={{display:"flex",alignItems:"center",gap:8,marginBottom:14}}><Bell size={15} color={A.red}/><span style={{fontWeight:900,fontStyle:"italic",fontSize:14,color:A.text}}>NOTIFICHE</span></div>{[{k:"news",l:"Ultime notizie B&T",d:"Nuovi articoli e video"},{k:"live",l:"Allerte gara live",d:"Inizio gara e risultati"},{k:"fanta",l:"Novità Fanta F1",d:"Aggiornamenti punteggi"}].map(it=>(<div key={it.k} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"11px 0",borderBottom:`1px solid ${A.border}`}}><div><div style={{fontSize:14,color:A.text,marginBottom:2}}>{it.l}</div><div style={{fontSize:11,color:A.muted}}>{it.d}</div></div><Tg v={notif[it.k]} chg={v=>setNotif(p=>({...p,[it.k]:v}))}/></div>))}</div>{blocked.length>0&&<div style={{background:A.card,borderRadius:14,padding:"14px 18px",marginBottom:14}}><div style={{fontWeight:900,fontStyle:"italic",fontSize:14,color:A.text,marginBottom:10}}>UTENTI BLOCCATI</div>{blocked.map((b,i)=>(<div key={(b.aid||"")+b.name+i} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"7px 0",borderBottom:`1px solid ${A.border}`}}><span style={{fontSize:13,color:A.text}}>{b.name}</span><button onClick={()=>unblock(b)} style={{background:"transparent",border:`1px solid ${A.border}`,borderRadius:8,padding:"4px 10px",color:A.muted,fontSize:11,cursor:"pointer"}}>Sblocca</button></div>))}</div>}<button onClick={onShowTerms} style={{width:"100%",background:"transparent",border:"none",padding:"10px 0",color:A.muted,fontSize:13,cursor:"pointer",textAlign:"center",marginBottom:0}}>Termini e Condizioni</button><PrivacyLinks/><Btn ch={<><LogOut size={15}/> ESCI DALL'ACCOUNT</>} onClick={onLogout} out s={{marginBottom:11}}/><button onClick={()=>setConfirmDel(true)} style={{width:"100%",background:"transparent",border:`1px solid ${A.border}`,borderRadius:10,padding:13,color:A.dim,fontSize:13,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",gap:8}}><Trash2 size={14}/> ELIMINA ACCOUNT</button><p style={{color:A.dim,fontSize:10,lineHeight:1.55,textAlign:"center",margin:"18px 4px 0"}}>{F1_DISCLAIMER}</p>{confirmDel&&<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.85)",zIndex:400,display:"flex",alignItems:"center",justifyContent:"center",padding:20}}><div style={{background:A.card,borderRadius:14,padding:22,maxWidth:360,width:"100%",textAlign:"center"}}><Trash2 size={30} color={A.red} style={{margin:"0 auto 10px"}}/><h3 style={{fontWeight:900,fontStyle:"italic",fontSize:17,color:A.text,marginBottom:8}}>Eliminare l'account?</h3><p style={{color:A.muted,fontSize:13,lineHeight:1.6,marginBottom:18}}>Cancelleremo il tuo profilo, i messaggi che hai scritto in chat e i feedback inviati. L'operazione non si può annullare.</p><Btn ch={deleting?"ELIMINAZIONE IN CORSO…":"ELIMINA DEFINITIVAMENTE"} onClick={confirmDelete} dis={deleting} s={{marginBottom:10}}/><button onClick={()=>setConfirmDel(false)} style={{background:"transparent",border:"none",color:A.muted,fontSize:13,padding:10,cursor:"pointer"}}>Annulla</button></div></div>}</div>);};
 
 // TASTIERINO INDUSTRIALE
 const AdminKeypad=({onOk,onCancel})=>{
@@ -1039,46 +1180,85 @@ const AdminKeypad=({onOk,onCancel})=>{
 // ════════════════════════════════════════════════════════
 // ── ADMOB BANNER REALE (Capacitor SDK su APK, fallback su web)
 // ════════════════════════════════════════════════════════
-const useAdMob = () => {
-  const isCapacitor = typeof window !== "undefined" &&
-    window.Capacitor && window.Capacitor.isNativePlatform &&
-    window.Capacitor.isNativePlatform();
-  return isCapacitor;
+const isNativeApp = () => !!(typeof window !== "undefined" &&
+  window.Capacitor && window.Capacitor.isNativePlatform &&
+  window.Capacitor.isNativePlatform());
+const useAdMob = isNativeApp;
+const admobPlugin = () => (typeof window !== "undefined" && window.Capacitor?.Plugins?.AdMob) || null;
+
+// Avvio di AdMob, una sola volta per apertura dell'app. Prima di chiedere qualsiasi
+// annuncio chiediamo a Google se serve il consenso (UE, Regno Unito, Svizzera) e, se
+// serve, mostriamo il suo messaggio certificato (quello creato su AdMob → Privacy e
+// messaggi). Senza consenso agli utenti europei arriverebbero solo annunci non
+// personalizzati o "limitati". Restituisce true se si possono chiedere annunci.
+let _admobReady = null;
+let _privacyOptionsRequired = false; // true dove Google chiede di poter cambiare le scelte (UE ecc.)
+function admobReady() {
+  if (_admobReady) return _admobReady;
+  const p = (async () => {
+    const AdMob = admobPlugin();
+    if (!AdMob || !isNativeApp()) return false;
+    try {
+      await AdMob.initialize({ requestTrackingAuthorization: true });
+      let info = await AdMob.requestConsentInfo();
+      if (info && info.isConsentFormAvailable && info.status === "REQUIRED") info = await AdMob.showConsentForm();
+      _privacyOptionsRequired = !!info && info.privacyOptionsRequirementStatus === "REQUIRED";
+      return !!info && info.canRequestAds !== false;
+    } catch (e) {
+      // Rete assente o errore di Google: per ora niente annunci, si riprova al prossimo.
+      _admobReady = null;
+      return false;
+    }
+  })();
+  _admobReady = p;
+  return p;
+}
+// Dal profilo: riapre le scelte sulla privacy degli annunci (obbligatorio poterle cambiare).
+const openPrivacyOptions = async () => {
+  const AdMob = admobPlugin();
+  if (!AdMob) return;
+  try { await admobReady(); await AdMob.showPrivacyOptionsForm(); _admobReady = null; }
+  catch { alert("Le preferenze sulla privacy degli annunci non sono disponibili in questo momento."); }
 };
 
-const AdMobBanner = ({ isPremium, position = "bottom", compact = false, adId = ADMOB_BANNER_ID, adSize }) => {
+// Altezza vera del banner nativo in px (0 = nessun banner). La comunica AdMob con
+// l'evento "bannerAdSizeChanged"; la root la usa per alzare le schede in basso sopra il
+// banner, su qualunque pagina il banner compaia (prima succedeva solo sulla Home).
+const bannerBus = { h: 0, subs: new Set(), set(h) { if (h === this.h) return; this.h = h; this.subs.forEach(f => f(h)); } };
+// Mostra/rimuovi banner in fila, uno dopo l'altro: cambiando pagina il vecchio banner va
+// tolto prima che parta quello nuovo, altrimenti la rimozione potrebbe cancellare il nuovo.
+let _bannerOps = Promise.resolve();
+const bannerOp = fn => (_bannerOps = _bannerOps.then(() => Promise.race([Promise.resolve().then(fn), new Promise(r => setTimeout(r, 10000))])).catch(() => {}));
+
+const AdMobBanner = ({ isPremium, adId = ADMOB_BANNER_ID, adSize = "BANNER" }) => {
   const isNative = useAdMob();
 
   useEffect(() => {
     if (isPremium || !isNative) return;
-    (async () => {
-      try {
-        const { AdMob } = { AdMob: window.Capacitor?.Plugins?.AdMob };
-        if (!AdMob) return;
-        await AdMob.initialize({ requestTrackingAuthorization: true });
-        await AdMob.showBanner({
-          adId,
-          adSize: adSize || (compact ? "SMART_BANNER" : "BANNER"),
-          position: "BOTTOM_CENTER",
-          margin: 0,
-          isTesting: false,
-        });
-      } catch (e) { /* nessun annuncio disponibile in questo momento: niente da mostrare */ }
-    })();
-    // Cleanup: se il componente si smonta (es. cambio pagina) rimuovi il banner nativo,
-    // altrimenti resterebbe visibile sopra le altre schede e bloccherebbe i tap sulla Nav.
+    const AdMob = admobPlugin();
+    if (!AdMob) return;
+    let alive = true;
+    const handles = [];
+    bannerOp(async () => {
+      if (!alive || !(await admobReady()) || !alive) return;
+      handles.push(await AdMob.addListener("bannerAdSizeChanged", s => {
+        if (alive) bannerBus.set(Math.max(0, Math.round((s && s.height) || 0)));
+      }));
+      await AdMob.showBanner({ adId, adSize, position: "BOTTOM_CENTER", margin: 0, isTesting: false });
+    });
+    // Cambio pagina: via il banner nativo, altrimenti resterebbe sopra le altre schede.
     return () => {
-      const { AdMob } = { AdMob: window.Capacitor?.Plugins?.AdMob };
-      AdMob?.removeAllListeners?.().catch(() => {});
-      AdMob?.removeBanner?.().catch(() => {});
+      alive = false;
+      bannerOp(async () => {
+        handles.splice(0).forEach(h => { try { h.remove(); } catch {} });
+        bannerBus.set(0);
+        await AdMob.removeBanner();
+      });
     };
   }, [isPremium, isNative, adId, adSize]);
 
-  if (isPremium || !isNative) return null;
-  // Il banner vero lo gestisce nativamente AdMob (overlay sopra la WebView);
-  // questo div riserva solo lo spazio corrispondente nel layout — niente più
-  // banner finto di riserva (rimosso: ora ci sono le pubblicità vere).
-  return <div style={{ height: compact ? 44 : 60 }}/>;
+  // Il banner vero è disegnato da Android sopra l'app: qui non serve niente.
+  return null;
 };
 
 // ════════════════════════════════════════════════════════
@@ -1269,44 +1449,6 @@ const SplashScreen = ({ onDone }) => {
 };
 
 // ════════════════════════════════════════════════════════
-// ── COOKIE BANNER
-// ════════════════════════════════════════════════════════
-const CookieBanner = ({ onAccept, onReject }) => (
-  <div style={{
-    position:"fixed", bottom:70, left:0, right:0, maxWidth:430, margin:"0 auto",
-    background:"#1a1a1a", borderTop:`2px solid #E10600`, padding:"14px 16px",
-    zIndex:800, boxShadow:"0 -4px 20px rgba(0,0,0,.6)",
-  }}>
-    <div style={{ display:"flex", alignItems:"flex-start", gap:10, marginBottom:12 }}>
-      <span style={{ fontSize:20, flexShrink:0 }}>🍪</span>
-      <div>
-        <div style={{ fontWeight:800, fontSize:13, color:"#fff", marginBottom:4 }}>
-          Usiamo i cookie
-        </div>
-        <p style={{ fontSize:11, color:"#888", lineHeight:1.55, margin:0 }}>
-          Usiamo cookie tecnici per il funzionamento e analitici per migliorare l'esperienza.
-          Nessun dato viene venduto a terzi.{" "}
-          <button onClick={()=>{}} style={{ background:"none",border:"none",color:"#E10600",
-            fontSize:11,cursor:"pointer",padding:0,textDecoration:"underline" }}>
-            Privacy Policy
-          </button>
-        </p>
-      </div>
-    </div>
-    <div style={{ display:"flex", gap:8 }}>
-      <button onClick={onAccept} style={{
-        flex:1, background:"#E10600", border:"none", borderRadius:8, padding:"10px",
-        color:"#fff", fontWeight:800, fontSize:12, cursor:"pointer",
-      }}>ACCETTA TUTTO</button>
-      <button onClick={onReject} style={{
-        flex:1, background:"transparent", border:"1px solid #444", borderRadius:8, padding:"10px",
-        color:"#888", fontWeight:700, fontSize:12, cursor:"pointer",
-      }}>SOLO TECNICI</button>
-    </div>
-  </div>
-);
-
-// ════════════════════════════════════════════════════════
 // ── TERMINI & CONDIZIONI MODAL
 // ════════════════════════════════════════════════════════
 const TermsModal = ({ onAccept, reviewMode = false }) => {
@@ -1357,13 +1499,13 @@ const TermsModal = ({ onAccept, reviewMode = false }) => {
           <p style={{ marginTop:8 }}>{F1_DISCLAIMER} B&T App non è associata nemmeno alla FIA, alle scuderie o ai piloti.</p>
 
           <h3 style={{ color:"#E10600", fontStyle:"italic", margin:"16px 0 8px" }}>6. Condotta degli Utenti</h3>
-          <p>Nella chat community è vietato pubblicare contenuti offensivi, spam, materiale illegale o informazioni personali altrui. Le violazioni possono comportare la sospensione dell'account.</p>
+          <p>Nella chat community è vietato pubblicare contenuti offensivi, discriminatori, sessualmente espliciti, spam, materiale illegale o informazioni personali altrui. Con il tasto ⋯ su ogni messaggio puoi segnalarlo o bloccare chi l'ha scritto: i messaggi segnalati vengono controllati dai moderatori e rimossi se violano queste regole. Le violazioni possono comportare la sospensione dalla chat o dell'account.</p>
 
           <h3 style={{ color:"#E10600", fontStyle:"italic", margin:"16px 0 8px" }}>7. Pubblicità</h3>
-          <p>Gli utenti non abbonati visualizzeranno annunci pubblicitari forniti tramite Google AdMob. Le preferenze pubblicitarie possono essere gestite nelle impostazioni del dispositivo.</p>
+          <p>Gli utenti non abbonati visualizzeranno annunci pubblicitari forniti tramite Google AdMob. Nell'Unione Europea ti chiediamo il consenso con il messaggio di Google e puoi cambiare le tue scelte in qualsiasi momento da Profilo → Preferenze privacy annunci.</p>
 
           <h3 style={{ color:"#E10600", fontStyle:"italic", margin:"16px 0 8px" }}>8. Privacy e Cookie</h3>
-          <p>Raccogliamo i dati necessari al funzionamento del servizio (email, preferenze). I dati sono conservati su Firebase (Google) in server europei. Non vendiamo i dati a terzi. Per dettagli consulta la nostra Privacy Policy.</p>
+          <p>Raccogliamo solo i dati necessari al funzionamento del servizio (email, nome, messaggi in chat, preferenze) e li conserviamo su Firebase (Google). Non vendiamo i dati a terzi. Puoi eliminare l'account e i tuoi dati in qualsiasi momento da Profilo → Elimina account. Tutti i dettagli sono nella <button onClick={()=>openUrl(PRIVACY_URL)} aria-label="Apri la Privacy Policy" style={{ background:"none", border:"none", padding:0, color:"#E10600", textDecoration:"underline", cursor:"pointer", font:"inherit" }}>Privacy Policy</button>.</p>
 
           <h3 style={{ color:"#E10600", fontStyle:"italic", margin:"16px 0 8px" }}>9. Limitazione di Responsabilità</h3>
           <p>B&T App non garantisce l'accuratezza assoluta dei dati live di gara. L'App è fornita "così com'è". Non siamo responsabili per interruzioni del servizio, perdita di dati o danni derivanti dall'uso dell'App.</p>
@@ -1578,6 +1720,82 @@ const AdminNotifications=({notifs,setNotifs})=>{
   );
 };
 
+// ── MODERAZIONE CHAT (pannello admin → CHAT) ──
+// Segnalazioni degli utenti, sospensioni e ultimi messaggi di ogni stanza:
+// Google Play chiede che un moderatore possa intervenire sui contenuti degli utenti.
+const AdminChatModeration=()=>{
+  const [reps,setReps]=useState(null);
+  const [banned,setBanned]=useState([]);
+  const [roomK,setRoomK]=useState("generale");
+  // Elenco e stanza insieme: così "ELIMINA" agisce sempre sulla stanza dei messaggi mostrati.
+  const [recent,setRecent]=useState({room:"generale",list:[]});
+  const reqN=useRef(0);
+  const [note,setNote]=useState("");
+  const roomOf=k=>CHAT_ROOMS.find(r=>r.key===k);
+  const loadRecent=async k=>{const n=++reqN.current;const d=(await sg(roomOf(k).dbKey,true))||[];if(n===reqN.current)setRecent({room:k,list:d.slice(-30).reverse()});};
+  const load=async()=>{
+    setReps(((await sg(CHAT_REPORTS_KEY,true))||[]).slice().sort((a,b)=>b.t-a.t));
+    setBanned((await sg(CHAT_BANNED_KEY,true))||[]);
+    await loadRecent(roomK);
+  };
+  useEffect(()=>{load();},[]);
+  const say=t=>{setNote(t);setTimeout(()=>setNote(""),3500);};
+  const act=async fn=>{try{await fn();}catch(e){console.error("moderazione:",e);say("Operazione non riuscita: controlla la connessione e riprova.");}};
+  // Operazioni atomiche: non si perdono segnalazioni o messaggi arrivati nel frattempo.
+  const removeReports=async drop=>{await sharedRemoveWhere(CHAT_REPORTS_KEY,drop);setReps(((await sg(CHAT_REPORTS_KEY,true))||[]).slice().sort((a,b)=>b.t-a.t));};
+  const delMsg=(roomKey,msgId)=>act(async()=>{
+    const r=roomOf(roomKey);
+    if(r)await sharedRemoveWhere(r.dbKey,m=>m.id===msgId);
+    await removeReports(x=>x.msgId===msgId);
+    await loadRecent(roomK);
+    say("Messaggio eliminato.");
+  });
+  // Serve l'ID autore: per i messaggi vecchi lo ricaviamo dal nome solo se è di un solo utente.
+  const suspend=(name,aid)=>act(async()=>{
+    let id=aid;
+    if(!id){const em=await emailsWithName(name);if(em.length===1)id=authorId(em[0]);}
+    if(!id){say(`Non riesco a identificare con certezza ${name} (messaggio vecchio o nome usato da più utenti): sospendilo da un suo messaggio più recente.`);return;}
+    const b=(await sg(CHAT_BANNED_KEY,true))||[];
+    if(!b.some(x=>x.aid===id))await sharedAppend(CHAT_BANNED_KEY,{aid:id,name,t:Date.now()});
+    setBanned((await sg(CHAT_BANNED_KEY,true))||[]);
+    say(`${name} non può più scrivere in chat.`);
+  });
+  const unban=x=>act(async()=>{await sharedRemoveWhere(CHAT_BANNED_KEY,y=>y.name===x.name&&(y.aid||"")===(x.aid||""));setBanned((await sg(CHAT_BANNED_KEY,true))||[]);say(`${x.name} può di nuovo scrivere.`);});
+  const card={background:A.card,borderRadius:14,padding:14,marginBottom:10};
+  const small=(bg,col)=>({background:bg,color:col,border:bg==="transparent"?`1px solid ${A.border}`:"none",borderRadius:8,padding:"7px 11px",fontSize:11,fontWeight:800,cursor:"pointer"});
+  const title={color:A.red,fontWeight:900,fontStyle:"italic",fontSize:13,margin:"16px 0 12px"};
+  return(<div>
+    {note&&<div style={{...card,background:A.card2,fontSize:12,color:A.text,textAlign:"center"}}>{note}</div>}
+    <div style={title}>SEGNALAZIONI{reps&&reps.length?` (${reps.length})`:""}</div>
+    {reps===null&&<div style={{color:A.muted,fontSize:12}}>Caricamento…</div>}
+    {reps&&reps.length===0&&<div style={{...card,color:A.muted,fontSize:12}}>Nessuna segnalazione da controllare.</div>}
+    {reps&&reps.map(r=><div key={r.id} style={card}>
+      <div style={{fontSize:11,color:A.muted,marginBottom:6}}>{(roomOf(r.room)||{label:r.room}).label} · scritto da <b style={{color:A.text}}>{r.author}</b></div>
+      <div style={{fontSize:13,color:A.text,marginBottom:6}}>“{r.txt}”</div>
+      <div style={{fontSize:10,color:A.dim,marginBottom:10}}>Segnalato da {r.by} · {fmt(new Date(r.t).toISOString())}</div>
+      <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+        <button onClick={()=>delMsg(r.room,r.msgId)} style={small(A.red,"#fff")}>ELIMINA MESSAGGIO</button>
+        <button onClick={()=>suspend(r.author,r.aid)} style={small(A.card2,A.text)}>SOSPENDI {r.author}</button>
+        <button onClick={()=>act(()=>removeReports(x=>x.id===r.id))} style={small("transparent",A.muted)}>IGNORA</button>
+      </div>
+    </div>)}
+    <div style={title}>UTENTI SOSPESI</div>
+    {banned.length===0?<div style={{...card,color:A.muted,fontSize:12}}>Nessun utente sospeso.</div>:banned.map(x=><div key={(x.aid||"")+x.name} style={{...card,display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+      <span style={{fontSize:13,color:A.text}}>{x.name}</span>
+      <button onClick={()=>unban(x)} style={small("transparent",A.muted)}>RIATTIVA</button>
+    </div>)}
+    <div style={title}>ULTIMI MESSAGGI</div>
+    <div style={{display:"flex",gap:6,overflowX:"auto",paddingBottom:10}}>{CHAT_ROOMS.map(r=><button key={r.key} onClick={()=>{setRoomK(r.key);loadRecent(r.key);}} style={{background:r.key===roomK?A.red:A.card,color:r.key===roomK?"#fff":A.muted,border:"none",borderRadius:20,padding:"6px 12px",fontSize:10,fontWeight:800,cursor:"pointer",whiteSpace:"nowrap"}}>{r.label}</button>)}</div>
+    {recent.room!==roomK?<div style={{...card,color:A.muted,fontSize:12}}>Caricamento…</div>:recent.list.length===0?<div style={{...card,color:A.muted,fontSize:12}}>Nessun messaggio in questa stanza.</div>:recent.list.map(m=><div key={m.id} style={{...card,display:"flex",gap:10,alignItems:"flex-start"}}>
+      <div style={{flex:1,minWidth:0}}><div style={{fontSize:11,color:A.muted,marginBottom:3}}>{m.user} · {chatRelTime(m.t)}</div><div style={{fontSize:13,color:A.text,wordBreak:"break-word"}}>{m.txt}</div></div>
+      <div style={{display:"flex",flexDirection:"column",gap:6}}>
+        <button onClick={()=>delMsg(recent.room,m.id)} style={small(A.red,"#fff")}>ELIMINA</button>
+        <button onClick={()=>suspend(m.user,m.aid)} style={small(A.card2,A.text)}>SOSPENDI</button>
+      </div>
+    </div>)}
+  </div>);
+};
+
 // ADMIN PANEL (compact)
 const AdminPanel=({news,setNews,fanta,setFanta,piloti,setPiloti,costruttori,setCostruttori,races,setRaces,ig,setIg,notifs,setNotifs,onClose})=>{
   const [tab,setTab]=useState("NEWS");
@@ -1599,7 +1817,7 @@ const AdminPanel=({news,setNews,fanta,setFanta,piloti,setPiloti,costruttori,setC
       <button onClick={onClose} style={{background:A.card2,border:"none",borderRadius:10,color:A.muted,cursor:"pointer",display:"flex",alignItems:"center",gap:6,marginBottom:16,fontSize:13,padding:"9px 14px"}}><ArrowLeft size={16}/> Esci</button>
       <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:14}}><Shield size={20} color={A.red}/><h1 style={{fontWeight:900,fontStyle:"italic",fontSize:21,color:A.text}}>PANNELLO ADMIN</h1></div>
       <div style={{display:"flex",gap:8,overflowX:"auto",paddingBottom:12}}>
-        {["NEWS","FANTA F1","CLASSIFICHE","GARA LIVE","INSTAGRAM","NOTIFICHE"].map(t=><button key={t} onClick={()=>setTab(t)} style={{background:tab===t?A.red:A.card,color:tab===t?"#fff":A.muted,border:"none",borderRadius:20,padding:"7px 15px",fontSize:11,fontWeight:800,fontStyle:"italic",cursor:"pointer",whiteSpace:"nowrap"}}>{t}</button>)}
+        {["NEWS","FANTA F1","CLASSIFICHE","GARA LIVE","INSTAGRAM","NOTIFICHE","CHAT"].map(t=><button key={t} onClick={()=>setTab(t)} style={{background:tab===t?A.red:A.card,color:tab===t?"#fff":A.muted,border:"none",borderRadius:20,padding:"7px 15px",fontSize:11,fontWeight:800,fontStyle:"italic",cursor:"pointer",whiteSpace:"nowrap"}}>{t}</button>)}
       </div>
     </div>
     <div style={{padding:"0 16px 80px"}}>
@@ -1608,6 +1826,7 @@ const AdminPanel=({news,setNews,fanta,setFanta,piloti,setPiloti,costruttori,setC
       {tab==="CLASSIFICHE"&&<div><div style={{display:"flex",gap:8,margin:"16px 0 14px"}}>{["PILOTI","COSTRUTTORI"].map(t=><button key={t} onClick={()=>setPT(t)} style={{background:t===pT?A.red:A.card,color:t===pT?"#fff":A.muted,border:"none",borderRadius:20,padding:"7px 16px",fontSize:11,fontWeight:800,cursor:"pointer"}}>{t}</button>)}</div><div style={{background:A.card,borderRadius:14,padding:12,marginBottom:14,display:"flex",gap:8,flexWrap:"wrap"}}><Inp ph="Nome" val={pf.name} chg={e=>setPf(p=>({...p,name:e.target.value}))} s={{flex:1,minWidth:120}}/>{pT==="PILOTI"&&<Inp ph="Team" val={pf.team} chg={e=>setPf(p=>({...p,team:e.target.value}))} s={{flex:1,minWidth:100}}/>}<button onClick={addPD} style={{background:A.red,border:"none",borderRadius:10,padding:"0 14px",color:"#fff",fontWeight:800,fontSize:12,cursor:"pointer"}}>AGGIUNGI</button></div>{pD.map(it=><div key={it.id} style={{background:A.card,borderRadius:12,padding:"12px 14px",marginBottom:8}}><div style={{marginBottom:8}}><span style={{fontWeight:700,fontSize:13,color:A.text}}>{it.name}</span>{it.team&&<span style={{fontSize:11,color:A.muted,marginLeft:8}}>{it.team}</span>}</div><div style={{display:"flex",gap:7,alignItems:"center"}}><input type="number" value={it.position} onChange={e=>setPD(d=>d.map(x=>x.id===it.id?{...x,position:parseInt(e.target.value)}:x))} style={{width:54,background:A.card2,border:`1px solid ${A.border}`,borderRadius:8,padding:"8px",color:A.text,fontSize:13,outline:"none",textAlign:"center"}}/><input type="number" value={it.points} onChange={e=>setPD(d=>d.map(x=>x.id===it.id?{...x,points:parseInt(e.target.value)}:x))} style={{flex:1,background:A.card2,border:`1px solid ${A.border}`,borderRadius:8,padding:"8px",color:A.text,fontSize:13,outline:"none"}}/><button onClick={async()=>await savePD(pD)} style={{background:A.red,border:"none",borderRadius:8,padding:"8px 12px",color:"#fff",fontWeight:800,fontSize:12,cursor:"pointer"}}>SALVA</button><button onClick={()=>savePD(pD.filter(x=>x.id!==it.id))} style={{background:"none",border:"none",cursor:"pointer"}}><Trash2 size={16} color={A.dim}/></button></div></div>)}</div>}
       {tab==="GARA LIVE"&&<div><div style={{color:A.red,fontWeight:900,fontStyle:"italic",fontSize:13,margin:"16px 0 12px"}}>GARE</div><div style={{background:A.card,borderRadius:14,padding:13,marginBottom:14,display:"flex",flexDirection:"column",gap:8}}><div style={{display:"flex",gap:8}}><Inp ph="Nome GP" val={gf.name} chg={e=>setGf(p=>({...p,name:e.target.value}))} s={{flex:1}}/><Inp ph="Circuito" val={gf.circuit} chg={e=>setGf(p=>({...p,circuit:e.target.value}))} s={{flex:1}}/></div><div style={{display:"flex",gap:8}}><Inp ph="Paese" val={gf.country} chg={e=>setGf(p=>({...p,country:e.target.value}))} s={{flex:1}}/><Inp ph="Round #" val={gf.round} chg={e=>setGf(p=>({...p,round:e.target.value}))} s={{flex:1}}/></div><input type="datetime-local" value={gf.date} onChange={e=>setGf(p=>({...p,date:e.target.value}))} style={{background:A.card,border:`1px solid ${A.border}`,borderRadius:10,padding:"11px 13px",color:A.text,fontSize:13,outline:"none",width:"100%"}}/><Btn ch="AGGIUNGI GARA" onClick={addR}/></div>{races.map(r=><div key={r.id} style={{background:A.card,borderRadius:12,padding:"13px 16px",marginBottom:10,display:"flex",alignItems:"center",justifyContent:"space-between"}}><div><div style={{fontWeight:700,fontSize:14,color:A.text}}>{r.name}</div><div style={{fontSize:11,color:A.muted}}>{r.circuit} · {r.date?new Date(r.date).toLocaleString("it-IT"):"-"}</div></div><div style={{display:"flex",gap:8,alignItems:"center"}}><select value={r.status} onChange={e=>saveR(races.map(x=>x.id===r.id?{...x,status:e.target.value}:x))} style={{background:r.status==="LIVE"?A.red:A.card2,border:`1px solid ${A.border}`,borderRadius:8,padding:"6px 10px",color:"#fff",fontSize:11,fontWeight:700,outline:"none",cursor:"pointer"}}>{["IN ARRIVO","LIVE","CONCLUSA"].map(s=><option key={s} style={{background:A.card,color:A.text}}>{s}</option>)}</select><button onClick={()=>saveR(races.filter(x=>x.id!==r.id))} style={{background:"none",border:"none",cursor:"pointer"}}><Trash2 size={16} color={A.dim}/></button></div></div>)}</div>}
       {tab==="NOTIFICHE"&&<AdminNotifications notifs={notifs} setNotifs={setNotifs}/>}
+      {tab==="CHAT"&&<AdminChatModeration/>}
       {tab==="INSTAGRAM"&&<div><div style={{color:A.red,fontWeight:900,fontStyle:"italic",fontSize:13,margin:"16px 0 12px"}}>FOLLOWER</div><div style={{background:A.card,borderRadius:14,padding:14,marginBottom:16}}><div style={{display:"flex",gap:8}}><input type="number" value={igF.followers} onChange={e=>setIgF(c=>({...c,followers:parseInt(e.target.value)||0}))} style={{flex:1,background:A.card2,border:`1px solid ${A.border}`,borderRadius:10,padding:"11px 13px",color:A.text,fontSize:14,outline:"none"}}/><button onClick={saveIg} style={{background:A.red,border:"none",borderRadius:10,padding:"0 16px",color:"#fff",fontWeight:800,fontSize:12,cursor:"pointer"}}>SALVA</button></div></div><div style={{color:A.red,fontWeight:900,fontStyle:"italic",fontSize:13,marginBottom:12}}>VIDEO VIRALI</div>{igF.videos.map((v,i)=><div key={v.id} style={{background:A.card,borderRadius:14,padding:14,marginBottom:12}}><div style={{display:"flex",justifyContent:"space-between",marginBottom:10}}><span style={{fontWeight:700,color:A.muted,fontSize:12}}>Video {i+1}</span><button onClick={()=>setIgF(c=>({...c,videos:c.videos.filter(x=>x.id!==v.id)}))} style={{background:"none",border:"none",cursor:"pointer"}}><Trash2 size={15} color={A.dim}/></button></div><div style={{display:"flex",flexDirection:"column",gap:8}}><Inp ph="Titolo" val={v.title} chg={e=>setIgF(c=>({...c,videos:c.videos.map(x=>x.id===v.id?{...x,title:e.target.value}:x)}))}/><Inp ph="URL thumbnail" val={v.thumbnail} chg={e=>setIgF(c=>({...c,videos:c.videos.map(x=>x.id===v.id?{...x,thumbnail:e.target.value}:x)}))}/><div style={{display:"flex",gap:8}}><Inp ph="Views" val={v.views} chg={e=>setIgF(c=>({...c,videos:c.videos.map(x=>x.id===v.id?{...x,views:e.target.value}:x)}))} s={{flex:1}}/><Inp ph="Likes" val={v.likes} chg={e=>setIgF(c=>({...c,videos:c.videos.map(x=>x.id===v.id?{...x,likes:e.target.value}:x)}))} s={{flex:1}}/></div></div></div>)}<button onClick={()=>setIgF(c=>({...c,videos:[...c.videos,{id:uid(),title:"",thumbnail:"",views:"0",likes:"0",url:"https://www.instagram.com/bt_formula1/"}]}))} style={{width:"100%",background:A.card,border:`1.5px dashed ${A.border}`,borderRadius:12,padding:13,color:A.muted,fontSize:13,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",gap:8,marginBottom:14}}><Plus size={15}/> Aggiungi Video</button><Btn ch={<><Save size={15}/> SALVA TUTTO</>} onClick={saveIg}/></div>}
     </div>
   </div>);
@@ -1629,7 +1848,9 @@ export default function BTApp(){
   const [showSplash,setShowSplash]=useState(true);
   const [showTerms,setShowTerms]=useState(false);
   const [showTermsReview,setShowTermsReview]=useState(false);
-  const [showCookies,setShowCookies]=useState(false);
+  // Altezza del banner AdMob nativo, per alzare le schede in basso sopra il banner.
+  const [bannerH,setBannerH]=useState(bannerBus.h);
+  useEffect(()=>{bannerBus.subs.add(setBannerH);return()=>{bannerBus.subs.delete(setBannerH);};},[]);
   const [showFeedback,setShowFeedback]=useState(false);
   const [termsAccepted,setTermsAccepted]=useState(false);
   const [news,setNews]=useState(D_NEWS);const [piloti,setPiloti]=useState(D_PILOTI);
@@ -1638,18 +1859,39 @@ export default function BTApp(){
 
   useEffect(()=>{(async()=>{try{const sess=await dbGet("sessions","current");if(sess){const u=await dbGet("users",sess.email);if(u)setUser(u);}const shared=[["bt-news",setNews],["bt-piloti",setPiloti],["bt-costruttori",setCostr],["bt-fanta-pilots",setFanta],["bt-races",setRaces],["bt-ig-config",setIg],["bt-notifs",setNotifs]];await Promise.all(shared.map(async([k,s])=>{const d=await sg(k,true);if(d)s(d);}));}catch{}setLoading(false);})();},[]);
 
-  // Termini e Condizioni + Cookie: mostrati una sola volta a persona (salvati sul
-  // dispositivo, non condivisi) — prima i Termini, poi il banner cookie.
+  // Termini e Condizioni: mostrati una sola volta a persona (salvati sul dispositivo).
+  // Il consenso per la pubblicità lo chiede il messaggio certificato di Google (vedi
+  // admobReady): il vecchio banner cookie salvava solo una scelta senza effetti, tolto.
   useEffect(()=>{(async()=>{
     const t=await sg("bt-terms-accepted",false);
     if(t)setTermsAccepted(true);else setShowTerms(true);
-    const c=await sg("bt-cookies-choice",false);
-    if(!c)setShowCookies(true);
   })();},[]);
 
   const doLogin=u=>{setUser(u);setAuth(false);};
   const doLogout=async()=>{await dbDelete("sessions","current");setUser(null);setPrem(false);setUnl(new Set());};
-  const doDelete=async()=>{await dbDelete("users",user.email);await dbDelete("sessions","current");setUser(null);};
+  // Elimina account (richiesto da Google Play): profilo, messaggi in chat, segnalazioni,
+  // sospensioni, feedback, codice di reset e dati salvati sul telefono. Se un passaggio
+  // fallisce (rete assente) ci fermiamo PRIMA di eliminare il profilo e l'utente riprova.
+  const doDelete=async()=>{
+    const u=user;if(!u)return;
+    const work=async()=>{
+      const aid=authorId(u.email);
+      // I messaggi vecchi non hanno l'ID autore: sono suoi solo se nessun altro ha lo stesso nome.
+      const nameUnique=!!u.name&&(await emailsWithName(u.name)).length<=1;
+      const byName=n=>nameUnique&&n===u.name;
+      const mine=m=>!!m&&(m.aid?m.aid===aid:byName(m.user));
+      for(const k of [...CHAT_ROOMS.map(r=>r.dbKey),"bt-chat"])await sharedRemoveWhere(k,mine);
+      await sharedRemoveWhere(CHAT_REPORTS_KEY,r=>r.byAid===aid||r.aid===aid||(!r.aid&&byName(r.author)));
+      await sharedRemoveWhere(CHAT_BANNED_KEY,b=>b.aid?b.aid===aid:byName(b.name));
+      await deleteUserFeedback(u.email);
+      await dbDelete("resets",u.email);
+      await dbDelete("users",u.email);
+    };
+    await Promise.race([work(),new Promise((_,rej)=>setTimeout(()=>rej(new Error("timeout")),20000))]);
+    await dbDelete("sessions","current");
+    local.del(BLOCKED_KEY);
+    setUser(null);setPrem(false);setUnl(new Set());
+  };
   const unreadCount=notifs.filter(n=>!readIds.has(n.id)).length;
   const markAllRead=()=>{const ids=new Set(notifs.map(n=>n.id));setReadIds(ids);};
   const openNotifs=()=>{
@@ -1691,10 +1933,6 @@ export default function BTApp(){
     await ss("bt-terms-accepted",{ts:Date.now()},false);
     setTermsAccepted(true);setShowTerms(false);
   };
-  const acceptCookies=async(all=true)=>{
-    await ss("bt-cookies-choice",{all,ts:Date.now()},false);
-    setShowCookies(false);
-  };
 
   const doAd=f=>{setAdTgt(f);setShowAd(true);};
   const adDone=()=>{if(adTgt)setUnl(p=>new Set([...p,adTgt]));setShowAd(false);setAdTgt(null);};
@@ -1708,19 +1946,22 @@ export default function BTApp(){
     setPage(p);
   };
   const isPr=page==="profile";const isND=page==="news-detail";
-  // Il banner AdMob nativo è montato solo nella Home (tra le news) ed è ancorato in basso
-  // dal sistema Android: riserviamo lo spazio alla Nav (e al contenuto) solo quando è
-  // davvero visibile — utente non Premium, APK reale, sulla schermata Home — così sulle
-  // altre schede la Nav resta normale e sulla Home non copre più i pulsanti.
-  const adBannerActive=useAdMob()&&!prem&&page==="home";
+  // Il banner AdMob nativo è disegnato da Android in fondo allo schermo (Home e RACE):
+  // quando c'è, schede e contenuti salgono della sua altezza vera più un distacco,
+  // così il banner non copre mai i pulsanti e non viene cliccato per sbaglio.
+  const adSpace=bannerH>0?bannerH+AD_GAP:0;
+  // Il banner nativo è disegnato da Android sopra l'app, finestre comprese: lo togliamo
+  // durante il caricamento (AdMob vieta annunci sulle schermate di caricamento), i Termini
+  // e ogni finestra aperta, altrimenti coprirebbe i loro pulsanti (clic accidentali).
+  const adsPaused=showSplash||(showTerms&&!termsAccepted)||showTermsReview||auth||showPremium||showFeedback||showNotifs||showAd;
   const renderP=()=>{
     if(isPr)return <ProfilePage user={user} onLogout={doLogout} onDelete={doDelete} onAdmin={()=>setKeypad(true)} notif={notif} setNotif={setNotif} isPremium={prem} onUpgrade={()=>setShowPremium(true)} onDowngrade={downgradeFree} onAuth={needAuth} onShowTerms={()=>setShowTermsReview(true)}/>;
     if(isND&&selN)return <NewsDetail a={selN} back={()=>setPage("home")}/>;
-    if(page==="home")return <HomePage news={news} setPage={setPage} setSN={setSelN} user={user} onAuth={needAuth} isPremium={prem} onUpgrade={()=>setShowPremium(true)}/>;
+    if(page==="home")return <HomePage news={news} setPage={setPage} setSN={setSelN} user={user} onAuth={needAuth} isPremium={prem} onUpgrade={()=>setShowPremium(true)} adsOff={adsPaused}/>;
     if(page==="instagram")return <IGPage ig={ig}/>;
     if(page==="chat")return <ChatPage races={races} user={user} onAuth={needAuth}/>;
     if(page==="fanta")return <FantaPage pilots={fanta} isPremium={prem} unlocked={unl} onAd={doAd} user={user} onAuth={needAuth} onUpgrade={()=>setShowPremium(true)}/>;
-    if(page==="live")return <LivePage races={races} piloti={piloti} costruttori={costr} isPremium={prem} unlocked={unl} onAd={doAd} user={user} onAuth={needAuth} onUpgrade={()=>setShowPremium(true)}/>;
+    if(page==="live")return <LivePage races={races} piloti={piloti} costruttori={costr} isPremium={prem} unlocked={unl} onAd={doAd} user={user} onAuth={needAuth} onUpgrade={()=>setShowPremium(true)} adsOff={adsPaused}/>;
     return null;
   };
   return(
@@ -1735,16 +1976,15 @@ export default function BTApp(){
       `}</style>
       {showSplash && <SplashScreen onDone={()=>setShowSplash(false)}/>}
       <Hdr onProfile={()=>setPage(isPr?"home":"profile")} onNotif={openNotifs} unreadCount={unreadCount} isPremium={prem} onUpgrade={()=>setShowPremium(true)}/>
-      <div style={{paddingBottom:80+(adBannerActive?AD_BANNER_H:0)}}>{renderP()}</div>
-      {!isPr&&!isND&&<Nav p={page} set={navigateTo} adOffset={adBannerActive?AD_BANNER_H:0}/>}
+      <div style={{paddingBottom:80+adSpace}}>{renderP()}</div>
+      {!isPr&&!isND&&<Nav p={page} set={navigateTo} adOffset={bannerH} adGap={bannerH>0?AD_GAP:0}/>}
       {showAd&&<AdModal onClose={()=>setShowAd(false)} onDone={adDone} feature={adTgt}/>}
       {auth&&<AuthModal onClose={()=>setAuth(false)} onLogin={doLogin}/>}
       {showNotifs&&<NotifCenter notifs={notifs.map(n=>({...n,read:readIds.has(n.id)}))} onClose={closeNotifs} onMarkRead={markAllRead}/>}
       {showPremium&&<PremiumModal onClose={()=>setShowPremium(false)} onUpgrade={upgradeToPremium} isPremium={prem} user={user}/>}
       {showTerms&&!termsAccepted&&<TermsModal onAccept={acceptTerms}/>}
       {showTermsReview&&<TermsModal onAccept={()=>setShowTermsReview(false)} reviewMode/>}
-      {showCookies&&!showTerms&&<CookieBanner onAccept={()=>acceptCookies(true)} onReject={()=>acceptCookies(false)}/>}
-      {!showSplash&&!showTerms&&page!=="chat"&&<FeedbackFAB onClick={()=>setShowFeedback(true)} adOffset={adBannerActive?AD_BANNER_H:0}/>}
+      {!showSplash&&!showTerms&&page!=="chat"&&<FeedbackFAB onClick={()=>setShowFeedback(true)} adOffset={adSpace}/>}
       {showFeedback&&<FeedbackModal onClose={()=>setShowFeedback(false)} user={user}/>}
     </div>
   );
