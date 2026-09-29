@@ -72,7 +72,7 @@ const F1_DISCLAIMER = "B&T App è un'app non ufficiale e non è associata in alc
 const SITE_URL = "https://formulaunobyedoardoandfabio-del.github.io/bt-app-flutter";
 const PRIVACY_URL = SITE_URL + "/privacy.html";
 const DELETE_ACCOUNT_URL = SITE_URL + "/elimina-account.html";
-const CONTACT_EMAIL = "formulaunobyedoardoandfabio@gmail.com";
+const CONTACT_EMAIL = "bt.formula1@gmail.com";
 // Apre un link fuori dall'app: nell'APK con il browser di sistema (plugin Browser),
 // sul web in una nuova scheda.
 const openUrl = url => {
@@ -1514,7 +1514,7 @@ const TermsModal = ({ onAccept, reviewMode = false }) => {
           <p>Ci riserviamo il diritto di modificare questi termini. Gli utenti saranno notificati tramite l'App. L'uso continuato dopo le modifiche costituisce accettazione dei nuovi termini.</p>
 
           <h3 style={{ color:"#E10600", fontStyle:"italic", margin:"16px 0 8px" }}>11. Legge Applicabile</h3>
-          <p style={{ marginBottom:30 }}>I presenti Termini sono regolati dalla legge italiana. Per qualsiasi controversia è competente il Foro di Milano. Per contatti: formulaunobyedoardoandfabio@gmail.com</p>
+          <p style={{ marginBottom:30 }}>I presenti Termini sono regolati dalla legge italiana. Per qualsiasi controversia è competente il Foro di Milano. Per contatti: {CONTACT_EMAIL}</p>
         </div>
         <div style={{ padding:"12px 20px 28px", borderTop:"1px solid #2d2d2d", flexShrink:0 }}>
           {!scrolled && <p style={{ fontSize:11, color:"#666", textAlign:"center", marginBottom:10 }}>
