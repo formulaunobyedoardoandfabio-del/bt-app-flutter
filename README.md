@@ -56,7 +56,7 @@ volta sola):
 
 Da quel momento, ogni volta che una correzione viene pubblicata su GitHub
 parte da sola una build, e l'APK arriva automaticamente via email a
-formulaunobyedoardoandfabio@gmail.com — senza dover più aprire Codemagic e
+bt.formula1@gmail.com — senza dover più aprire Codemagic e
 premere "Start new build". Se preferisci continuare a farlo a mano, va bene
 lo stesso: questo passaggio è facoltativo.
 
