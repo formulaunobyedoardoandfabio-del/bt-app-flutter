@@ -31,6 +31,10 @@ workflows:
       <<: *env
       groups:
         - bt_secrets
+      vars:
+        # Annunci di prova di Google (scritta "Test Ad"): si vede che la pubblicità
+        # funziona senza cliccare quelli veri. La build per il Play Store non lo ha.
+        BT_ADMOB_TEST: "1"
     # Build automatica a ogni push su main (una volta collegato il webhook
     # su GitHub — vedi README.md), così non serve più premere "Start new
     # build" a mano dopo ogni correzione.

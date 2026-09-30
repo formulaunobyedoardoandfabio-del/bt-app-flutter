@@ -4,14 +4,32 @@
 - imposta versionCode dal numero di build di Codemagic
 - se c'è un keystore (build di release), configura la firma
 - copia l'icona reale dell'app (logo B&T) al posto di quella di default
+- con BT_ADMOB_TEST=1 (solo "B&T - APK di prova") accende gli annunci di prova di Google
 """
 import os
 import re
 import shutil
+import sys
 
 MANIFEST = "android/app/src/main/AndroidManifest.xml"
 GRADLE = "android/app/build.gradle"
+WEB_INDEX = "android/app/src/main/assets/public/index.html"
 ADMOB_APP_ID = "ca-app-pub-5787516371588469~8054706643"
+ADMOB_TEST_FLAG = "<script>window.BT_ADMOB_TEST=true;</script>"
+
+# ── ANNUNCI DI PROVA (solo APK di prova) ──
+# L'app legge window.BT_ADMOB_TEST (vedi ADMOB_TEST in src/App.jsx): va scritto in cima
+# alla pagina, prima dello script dell'app. La build del Play Store non lo imposta mai.
+if os.environ.get("BT_ADMOB_TEST") == "1":
+    if not os.path.isfile(WEB_INDEX):
+        sys.exit(f"ERRORE: {WEB_INDEX} non trovato (npx cap sync non ha copiato l'app?)")
+    page = open(WEB_INDEX, encoding="utf-8").read()
+    if ADMOB_TEST_FLAG not in page:
+        page, n = re.subn(r"(<head[^>]*>)", r"\1" + ADMOB_TEST_FLAG, page, count=1, flags=re.I)
+        if not n:
+            sys.exit(f"ERRORE: <head> non trovato in {WEB_INDEX}")
+        open(WEB_INDEX, "w", encoding="utf-8").write(page)
+    print("Annunci di prova di Google attivi (APK di prova)")
 
 # ── ICONA APP (logo B&T al posto del robottino di default Capacitor) ──
 ICON_SRC = "resources/icons"
