@@ -172,41 +172,80 @@ async function getDb() {
   }
 }
 
-// ── STORAGE (upload immagini dall'Admin) ──
-let _storage = null;
-async function getStorage() {
-  if (!USE_FIREBASE) return null;
-  if (_storage) return _storage;
-  try {
-    if (!window._firebaseLoaded) {
-      await Promise.all([
-        loadScript("https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"),
-        loadScript("https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"),
-      ]);
-      window._firebaseLoaded = true;
-    }
-    if (!window._firebaseStorageLoaded) {
-      await loadScript("https://www.gstatic.com/firebasejs/10.12.0/firebase-storage-compat.js");
-      window._firebaseStorageLoaded = true;
-    }
-    if (!window.firebase.apps.length) {
-      window.firebase.initializeApp(FIREBASE_CONFIG);
-    }
-    _storage = window.firebase.storage();
-    return _storage;
-  } catch (e) {
-    console.error("Firebase Storage init error:", e);
-    return null;
+// ── IMMAGINI DELLE NOTIZIE (upload dall'Admin) ──
+// Le foto vanno in Firestore, una per documento (shared/img-<id>), ridotte e compresse sul
+// telefono. Non usiamo Firebase Storage: il bucket del progetto (….firebasestorage.app) funziona
+// solo col piano Blaze, che chiede la carta di credito; senza, il caricamento restava per sempre
+// su "Caricamento…". La notizia salva solo il riferimento "fsimg:<id>": tutte le notizie stanno in
+// un unico documento (shared/bt-news) e Firestore accetta al massimo 1 MB per documento.
+const IMG_REF = "fsimg:";
+const IMG_MAX_CHARS = 600000;     // foto compressa (base64): ben sotto il limite di 1 MB
+const IMG_SAVE_TIMEOUT = 20000;   // oltre, diciamo che la connessione non va invece di aspettare per sempre
+const _imgCache = new Map();      // riferimento → promessa dell'immagine (data URL)
+const mkImgErr = code => Object.assign(new Error(code), { code });
+function readAsDataURL(file) {
+  return new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = () => rej(mkImgErr("lettura")); r.readAsDataURL(file); });
+}
+function decodeImage(src) {
+  return new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(mkImgErr("formato")); i.src = src; });
+}
+// Ridimensiona (al massimo 1080×1350) e comprime in JPEG finché la foto non sta sotto IMG_MAX_CHARS.
+async function compressImage(file) {
+  const img = await decodeImage(await readAsDataURL(file));
+  const w0 = img.naturalWidth, h0 = img.naturalHeight;
+  if (!w0 || !h0) throw mkImgErr("formato");
+  const fit = Math.min(1, 1080 / w0, 1350 / h0);
+  const c = document.createElement("canvas"), g = c.getContext("2d");
+  for (const [k, q] of [[1, .8], [1, .68], [.8, .62], [.64, .58], [.5, .52], [.36, .5]]) {
+    c.width = Math.max(1, Math.round(w0 * fit * k)); c.height = Math.max(1, Math.round(h0 * fit * k));
+    g.fillStyle = "#000"; g.fillRect(0, 0, c.width, c.height); // PNG trasparenti: sfondo nero come l'app
+    g.drawImage(img, 0, 0, c.width, c.height);
+    const out = c.toDataURL("image/jpeg", q);
+    if (out.length <= IMG_MAX_CHARS) return out;
   }
+  throw mkImgErr("troppo-grande");
 }
+const withTimeout = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(mkImgErr("timeout")), ms))]);
 async function uploadImage(file) {
-  const storage = await getStorage();
-  if (!storage) throw new Error("Storage non disponibile");
-  const path = `news/${Date.now()}-${file.name.replace(/[^a-zA-Z0-9.\-]/g,"_")}`;
-  const ref = storage.ref().child(path);
-  await ref.put(file);
-  return await ref.getDownloadURL();
+  const data = await compressImage(file);
+  const db = await getDb();
+  if (!db) return data; // senza Firebase (versione web di prova) la foto resta dentro la notizia
+  const id = uid();
+  await withTimeout(db.collection("shared").doc("img-" + id).set({ data, ts: Date.now() }), IMG_SAVE_TIMEOUT);
+  const ref = IMG_REF + id;
+  _imgCache.set(ref, Promise.resolve(data));
+  return ref;
 }
+function loadNewsImage(src) {
+  if (!src || !String(src).startsWith(IMG_REF)) return Promise.resolve(src || "");
+  if (!_imgCache.has(src)) {
+    const p = sg("img-" + src.slice(IMG_REF.length), true).then(d => (d && d.data) || "");
+    _imgCache.set(src, p);
+    p.then(u => { if (!u) _imgCache.delete(src); }); // non trovata o rete assente: si riprova la volta dopo
+  }
+  return _imgCache.get(src);
+}
+// Cancellando una notizia si cancella anche la sua foto (se nessun'altra notizia la usa).
+async function dropNewsImage(src, stillUsed) {
+  if (!src || !String(src).startsWith(IMG_REF) || stillUsed) return;
+  _imgCache.delete(src);
+  await sd("img-" + src.slice(IMG_REF.length), true);
+}
+function useNewsImage(src) {
+  const [u, setU] = useState(src && !String(src).startsWith(IMG_REF) ? src : "");
+  useEffect(() => {
+    let alive = true;
+    if (!src) { setU(""); return undefined; }
+    if (!String(src).startsWith(IMG_REF)) { setU(src); return undefined; }
+    loadNewsImage(src).then(v => { if (alive) setU(v); });
+    return () => { alive = false; };
+  }, [src]);
+  return u;
+}
+const NewsImg = ({ src, style, children }) => {
+  const u = useNewsImage(src);
+  return <div style={{ ...style, backgroundImage: u ? `url(${u})` : "none" }}>{children}</div>;
+};
 
 function loadScript(src) {
   return new Promise((res, rej) => {
@@ -997,11 +1036,11 @@ const HomePage=({news,setPage,setSN,user,onAuth,isPremium,adFree,onUpgrade,adsOf
           <span style={{color:A.red,fontSize:18}}>›</span>
         </div>);
         return(<div key={n.id} onClick={()=>user?[setSN(n),setPage("news-detail")]:onAuth()} style={{background:A.card,borderRadius:14,overflow:"hidden",cursor:"pointer",opacity:user?1:.75}}>
-        <div style={{height:170,position:"relative",background:n.image?undefined:"#111",backgroundImage:n.image?`url(${n.image})`:"none",backgroundSize:"cover",backgroundPosition:"center",display:n.image?"block":"flex",alignItems:"center",justifyContent:"center"}}>
+        <NewsImg src={n.image} style={{height:170,position:"relative",background:"#111",backgroundSize:"cover",backgroundPosition:"center",display:n.image?"block":"flex",alignItems:"center",justifyContent:"center"}}>
           {!n.image&&<div style={{fontWeight:900,fontStyle:"italic",fontSize:44,color:"#fff",opacity:.1}}>B&T</div>}
           <Tag ch={n.category} s={{position:"absolute",top:0,left:0,borderRadius:"0 0 8px 0"}}/>
           {!user&&<div style={{position:"absolute",inset:0,background:"rgba(0,0,0,.5)",display:"flex",alignItems:"center",justifyContent:"center"}}><Lock size={28} color="#fff"/></div>}
-        </div>
+        </NewsImg>
         <div style={{padding:"13px 15px 16px"}}><h3 style={{fontWeight:800,fontSize:15,color:A.text,marginBottom:5,lineHeight:1.3}}>{n.title}</h3><p style={{color:A.muted,fontSize:12,marginBottom:5}}>{n.summary}</p><span style={{fontSize:11,color:A.dim}}>{fmt(n.date)}</span></div>
       </div>);
       })}
@@ -1011,7 +1050,7 @@ const HomePage=({news,setPage,setSN,user,onAuth,isPremium,adFree,onUpgrade,adsOf
     <p style={{color:A.dim,fontSize:10,lineHeight:1.55,textAlign:"center",padding:"4px 16px 64px",margin:0}}>{F1_DISCLAIMER}</p>
   </div>);
 };
-const NewsDetail=({a,back})=>(<div style={{paddingBottom:88}}><button onClick={back} style={{display:"flex",alignItems:"center",gap:7,background:"none",border:"none",color:A.muted,padding:"16px 16px 8px",cursor:"pointer",fontSize:13}}><ArrowLeft size={16}/> Indietro</button>{a.image&&<div style={{height:220,backgroundImage:`url(${a.image})`,backgroundSize:"cover",backgroundPosition:"center"}}/>}<div style={{padding:"18px 16px"}}><Tag ch={a.category}/><h1 style={{fontWeight:900,fontStyle:"italic",fontSize:22,color:A.text,margin:"12px 0 8px",lineHeight:1.2}}>{a.title}</h1><p style={{fontSize:12,color:A.muted,marginBottom:20}}>{a.author} · {fmt(a.date)}</p>{(a.content||"").split("\n\n").map((p,i)=><p key={i} style={{color:"#ccc",fontSize:14,lineHeight:1.75,marginBottom:14}}>{p}</p>)}</div></div>);
+const NewsDetail=({a,back})=>(<div style={{paddingBottom:88}}><button onClick={back} style={{display:"flex",alignItems:"center",gap:7,background:"none",border:"none",color:A.muted,padding:"16px 16px 8px",cursor:"pointer",fontSize:13}}><ArrowLeft size={16}/> Indietro</button>{a.image&&<NewsImg src={a.image} style={{height:220,background:"#111",backgroundSize:"cover",backgroundPosition:"center"}}/>}<div style={{padding:"18px 16px"}}><Tag ch={a.category}/><h1 style={{fontWeight:900,fontStyle:"italic",fontSize:22,color:A.text,margin:"12px 0 8px",lineHeight:1.2}}>{a.title}</h1><p style={{fontSize:12,color:A.muted,marginBottom:20}}>{a.author} · {fmt(a.date)}</p>{(a.content||"").split("\n\n").map((p,i)=><p key={i} style={{color:"#ccc",fontSize:14,lineHeight:1.75,marginBottom:14}}>{p}</p>)}</div></div>);
 const IGPage=({ig})=>(<div style={{padding:"16px 16px 88px"}}><div style={{background:"linear-gradient(135deg,#405DE6,#5851DB,#833AB4,#C13584,#E1306C,#FD1D1D,#F56040)",borderRadius:16,padding:20,marginBottom:22,display:"flex",alignItems:"center",gap:16}}><div style={{width:64,height:64,borderRadius:"50%",border:"3px solid rgba(255,255,255,.6)",background:"#000",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,padding:10}}><img src={LOGO} alt="B&T" style={{width:"100%",height:"100%",objectFit:"contain"}}/></div><div><div style={{fontWeight:800,fontSize:15,color:"#fff",marginBottom:4}}>@bt_formula1</div><div style={{display:"flex",alignItems:"center",gap:7}}><span style={{width:8,height:8,borderRadius:"50%",background:"#4AE54A",display:"inline-block"}}/><span style={{fontWeight:900,fontSize:24,color:"#fff"}}>{fmtN(ig.followers)}</span><span style={{color:"rgba(255,255,255,.8)",fontSize:13,fontWeight:600}}>FOLLOWER</span></div></div></div><ST ch="VIDEO VIRALI"/>{ig.videos.map(v=>(<a key={v.id} href={v.url} target="_blank" rel="noreferrer" style={{textDecoration:"none",display:"block",marginBottom:14}}><div style={{background:A.card,borderRadius:14,overflow:"hidden"}}><div style={{height:185,backgroundImage:`url(${v.thumbnail})`,backgroundSize:"cover",backgroundPosition:"center",position:"relative"}}><div style={{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center"}}><div style={{width:52,height:52,borderRadius:"50%",background:"rgba(255,255,255,.2)",display:"flex",alignItems:"center",justifyContent:"center"}}><Play size={22} color="#fff" fill="#fff"/></div></div></div><div style={{padding:"12px 15px 14px"}}><p style={{fontWeight:700,fontSize:14,color:A.text,marginBottom:6}}>{v.title}</p><div style={{fontSize:11,color:A.red,fontWeight:600,marginBottom:5}}>@bt_formula1</div><div style={{display:"flex",gap:16,fontSize:12,color:A.muted}}><span>👁 {v.views}</span><span>❤️ {v.likes}</span></div></div></div></a>))}</div>);
 const CHAT_ROOMS=[{key:"generale",label:"Chat Generale",dbKey:"bt-chat-generale",color:A.red,icon:"msg"},{key:"live",label:"Live Gara",dbKey:"bt-chat-live-gara",color:"#4AE54A",icon:"activity"},{key:"fantaf1",label:"FantaF1 Talk",dbKey:"bt-chat-fantaf1-talk",color:"#E7B34C",icon:"trophy"},{key:"boxradio",label:"Box Radio",dbKey:"bt-chat-boxradio",color:"#2DD4BF",icon:"radio"},{key:"paddock",label:"Paddock Talk",dbKey:"bt-chat-paddocktalk",color:"#4A90E2",icon:"shield"}];
 const chatIcon=(icon,size=22)=>icon==="trophy"?<Trophy size={size} color="#fff"/>:icon==="radio"?<Radio size={size} color="#fff"/>:icon==="shield"?<Shield size={size} color="#fff"/>:icon==="activity"?<Activity size={size} color="#fff"/>:<MessageSquare size={size} color="#fff"/>;
@@ -1818,7 +1857,7 @@ const AdminPanel=({news,setNews,fanta,setFanta,piloti,setPiloti,costruttori,setC
   const [tab,setTab]=useState("NEWS");
   const [f,setF]=useState({title:"",summary:"",category:"NEWS",author:"Team B&T",image:"",content:"",published:true});
   const [imgUploading,setImgUploading]=useState(false);const [imgErr,setImgErr]=useState("");
-  const onPickImage=async e=>{const file=e.target.files?.[0];e.target.value="";if(!file)return;setImgErr("");setImgUploading(true);try{const url=await uploadImage(file);setF(p=>({...p,image:url}));}catch(err){console.error("uploadImage error:",err);setImgErr("Upload non riuscito, riprova");}setImgUploading(false);};
+  const onPickImage=async e=>{const file=e.target.files?.[0];e.target.value="";if(!file)return;setImgErr("");setImgUploading(true);try{const url=await uploadImage(file);setF(p=>({...p,image:url}));}catch(err){console.error("uploadImage error:",err);const c=err&&err.code;setImgErr(c==="timeout"?"La foto non è stata caricata: connessione assente o troppo lenta, riprova.":c==="formato"?"Formato non supportato: scegli una foto JPG o PNG.":c==="troppo-grande"?"Foto troppo pesante anche dopo la compressione: scegline un'altra.":"Upload non riuscito, riprova.");}setImgUploading(false);};
   const [genLoading,setGenLoading]=useState(false);const [genErr,setGenErr]=useState("");
   const genArticle=async()=>{if(!f.title){setGenErr("Scrivi prima un titolo");return;}setGenErr("");setGenLoading(true);try{const r=await fetch(`${FUNCTIONS_BASE}/generateArticle`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({title:f.title,summary:f.summary,category:f.category})});const d=await r.json();if(!r.ok)throw new Error(d.error||"Errore ChatGPT");setF(p=>({...p,content:d.content||""}));}catch(err){console.error("genArticle error:",err);setGenErr("ChatGPT non ha risposto, riprova");}setGenLoading(false);};
   const saveN=async u=>{setNews(u);await ss("bt-news",u);};const addN=async()=>{if(!f.title)return;await saveN([{...f,id:uid(),date:new Date().toISOString()},...news]);setF({title:"",summary:"",category:"NEWS",author:"Team B&T",image:"",content:"",published:true});setCustomCat(false);};
@@ -1838,7 +1877,7 @@ const AdminPanel=({news,setNews,fanta,setFanta,piloti,setPiloti,costruttori,setC
       </div>
     </div>
     <div style={{padding:"0 16px 80px"}}>
-      {tab==="NEWS"&&<div><div style={{color:A.red,fontWeight:900,fontStyle:"italic",fontSize:13,margin:"16px 0 12px"}}>NUOVO ARTICOLO</div><div style={{background:A.card,borderRadius:14,padding:14,marginBottom:16,display:"flex",flexDirection:"column",gap:9}}><Inp ph="Titolo" val={f.title} chg={e=>setF(p=>({...p,title:e.target.value}))}/><Inp ph="Sottotitolo" val={f.summary} chg={e=>setF(p=>({...p,summary:e.target.value}))}/><div style={{display:"flex",gap:8}}><select value={customCat?"__custom__":f.category} onChange={e=>{if(e.target.value==="__custom__"){setCustomCat(true);setF(p=>({...p,category:""}));}else{setCustomCat(false);setF(p=>({...p,category:e.target.value}));}}} style={{flex:1,background:A.card,border:`1px solid ${A.border}`,borderRadius:10,padding:"11px 13px",color:A.text,fontSize:13,outline:"none"}}>{cats.map(c=><option key={c} value={c}>{c}</option>)}<option value="__custom__">Altra categoria (Premium)…</option></select><Inp ph="Autore" val={f.author} chg={e=>setF(p=>({...p,author:e.target.value}))} s={{flex:1}}/></div>{customCat&&<Inp ph="Nome nuova categoria (sarà Premium)" val={f.category} chg={e=>setF(p=>({...p,category:e.target.value}))}/>}<div style={{display:"flex",flexDirection:"column",gap:6}}><div style={{display:"flex",gap:8}}><input type="file" accept="image/*" id="news-img-input" onChange={onPickImage} style={{display:"none"}}/><label htmlFor="news-img-input" style={{flex:1,background:A.card2,border:`1px solid ${A.border}`,borderRadius:10,padding:"11px 13px",color:A.text,fontSize:13,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",gap:8}}><ImagePlus size={15}/> {imgUploading?"Caricamento…":f.image?"Immagine caricata ✓":"Allega immagine"}</label><button onClick={genArticle} disabled={genLoading} style={{background:A.card2,border:`1px solid ${A.border}`,borderRadius:10,padding:"11px 14px",color:A.text,fontSize:13,cursor:genLoading?"default":"pointer",display:"flex",alignItems:"center",gap:6,opacity:genLoading?.6:1,whiteSpace:"nowrap"}}><Sparkles size={15}/> {genLoading?"Scrivo…":"ChatGPT"}</button></div>{f.image&&<img src={f.image} alt="" style={{width:"100%",height:90,objectFit:"cover",borderRadius:8}}/>}{(imgErr||genErr)&&<div style={{color:A.red,fontSize:11}}>{imgErr||genErr}</div>}</div><Inp ph="Contenuto" val={f.content} chg={e=>setF(p=>({...p,content:e.target.value}))} rows={4}/><div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}><span style={{fontSize:13,color:A.text,fontWeight:700}}>PUBBLICATO</span><Tg v={f.published} chg={v=>setF(p=>({...p,published:v}))}/></div><Btn ch="PUBBLICA" onClick={addN}/></div>{news.map(n=><div key={n.id} style={{background:A.card,borderRadius:12,padding:"12px 14px",marginBottom:8,display:"flex",alignItems:"flex-start",justifyContent:"space-between"}}><div style={{flex:1}}><Tag ch={n.category} s={{fontSize:9,marginRight:8}}/><span style={{fontSize:13,color:n.published?A.text:A.muted,fontWeight:600}}>{n.title}</span>{!n.published&&<span style={{fontSize:10,color:A.dim}}> (bozza)</span>}<div style={{fontSize:11,color:A.dim,marginTop:3}}>{fmt(n.date)}</div></div><button onClick={()=>saveN(news.filter(x=>x.id!==n.id))} style={{background:"none",border:"none",cursor:"pointer",paddingLeft:8}}><Trash2 size={16} color={A.dim}/></button></div>)}</div>}
+      {tab==="NEWS"&&<div><div style={{color:A.red,fontWeight:900,fontStyle:"italic",fontSize:13,margin:"16px 0 12px"}}>NUOVO ARTICOLO</div><div style={{background:A.card,borderRadius:14,padding:14,marginBottom:16,display:"flex",flexDirection:"column",gap:9}}><Inp ph="Titolo" val={f.title} chg={e=>setF(p=>({...p,title:e.target.value}))}/><Inp ph="Sottotitolo" val={f.summary} chg={e=>setF(p=>({...p,summary:e.target.value}))}/><div style={{display:"flex",gap:8}}><select value={customCat?"__custom__":f.category} onChange={e=>{if(e.target.value==="__custom__"){setCustomCat(true);setF(p=>({...p,category:""}));}else{setCustomCat(false);setF(p=>({...p,category:e.target.value}));}}} style={{flex:1,background:A.card,border:`1px solid ${A.border}`,borderRadius:10,padding:"11px 13px",color:A.text,fontSize:13,outline:"none"}}>{cats.map(c=><option key={c} value={c}>{c}</option>)}<option value="__custom__">Altra categoria (Premium)…</option></select><Inp ph="Autore" val={f.author} chg={e=>setF(p=>({...p,author:e.target.value}))} s={{flex:1}}/></div>{customCat&&<Inp ph="Nome nuova categoria (sarà Premium)" val={f.category} chg={e=>setF(p=>({...p,category:e.target.value}))}/>}<div style={{display:"flex",flexDirection:"column",gap:6}}><div style={{display:"flex",gap:8}}><input type="file" accept="image/*" id="news-img-input" onChange={onPickImage} style={{display:"none"}}/><label htmlFor="news-img-input" style={{flex:1,background:A.card2,border:`1px solid ${A.border}`,borderRadius:10,padding:"11px 13px",color:A.text,fontSize:13,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",gap:8}}><ImagePlus size={15}/> {imgUploading?"Caricamento…":f.image?"Immagine caricata ✓":"Allega immagine"}</label><button onClick={genArticle} disabled={genLoading} style={{background:A.card2,border:`1px solid ${A.border}`,borderRadius:10,padding:"11px 14px",color:A.text,fontSize:13,cursor:genLoading?"default":"pointer",display:"flex",alignItems:"center",gap:6,opacity:genLoading?.6:1,whiteSpace:"nowrap"}}><Sparkles size={15}/> {genLoading?"Scrivo…":"ChatGPT"}</button></div>{f.image&&<NewsImg src={f.image} style={{width:"100%",height:90,background:"#111",backgroundSize:"cover",backgroundPosition:"center",borderRadius:8}}/>}{(imgErr||genErr)&&<div style={{color:A.red,fontSize:11}}>{imgErr||genErr}</div>}</div><Inp ph="Contenuto" val={f.content} chg={e=>setF(p=>({...p,content:e.target.value}))} rows={4}/><div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}><span style={{fontSize:13,color:A.text,fontWeight:700}}>PUBBLICATO</span><Tg v={f.published} chg={v=>setF(p=>({...p,published:v}))}/></div><Btn ch="PUBBLICA" onClick={addN}/></div>{news.map(n=><div key={n.id} style={{background:A.card,borderRadius:12,padding:"12px 14px",marginBottom:8,display:"flex",alignItems:"flex-start",justifyContent:"space-between"}}><div style={{flex:1}}><Tag ch={n.category} s={{fontSize:9,marginRight:8}}/><span style={{fontSize:13,color:n.published?A.text:A.muted,fontWeight:600}}>{n.title}</span>{!n.published&&<span style={{fontSize:10,color:A.dim}}> (bozza)</span>}<div style={{fontSize:11,color:A.dim,marginTop:3}}>{fmt(n.date)}</div></div><button onClick={()=>saveN(news.filter(x=>x.id!==n.id)).then(()=>dropNewsImage(n.image,news.some(x=>x.id!==n.id&&x.image===n.image)))} style={{background:"none",border:"none",cursor:"pointer",paddingLeft:8}}><Trash2 size={16} color={A.dim}/></button></div>)}</div>}
       {tab==="FANTA F1"&&<div><div style={{color:A.red,fontWeight:900,fontStyle:"italic",fontSize:13,margin:"16px 0 12px"}}>PILOTI — PREZZI (M) E PUNTI</div><div style={{background:A.card,borderRadius:14,padding:12,marginBottom:14,display:"flex",gap:8}}><Inp ph="Nome" val={nff.name} chg={e=>setNff(p=>({...p,name:e.target.value}))} s={{flex:1}}/><Inp ph="Team" val={nff.team} chg={e=>setNff(p=>({...p,team:e.target.value}))} s={{flex:1}}/><button onClick={addF} style={{background:A.red,border:"none",borderRadius:10,padding:"0 14px",color:"#fff",fontWeight:800,fontSize:12,cursor:"pointer"}}>AGGIUNGI</button></div>{fanta.map(p=><div key={p.id} style={{background:A.card,borderRadius:12,padding:"12px 14px",marginBottom:8}}><div style={{marginBottom:8}}><span style={{fontWeight:700,fontSize:13,color:A.text}}>{p.name}</span><span style={{fontSize:11,color:A.muted,marginLeft:8}}>{p.team}</span></div><div style={{display:"flex",gap:7,alignItems:"center"}}><input type="number" step=".1" value={p.price} onChange={e=>setFanta(ps=>ps.map(x=>x.id===p.id?{...x,price:parseFloat(e.target.value)}:x))} style={{flex:1,background:A.card2,border:`1px solid ${A.border}`,borderRadius:8,padding:"8px",color:A.text,fontSize:13,outline:"none"}}/><input type="number" value={p.points} onChange={e=>setFanta(ps=>ps.map(x=>x.id===p.id?{...x,points:parseInt(e.target.value)}:x))} style={{flex:1,background:A.card2,border:`1px solid ${A.border}`,borderRadius:8,padding:"8px",color:A.text,fontSize:13,outline:"none"}}/><button onClick={async()=>await saveF(fanta)} style={{background:A.red,border:"none",borderRadius:8,padding:"8px 12px",color:"#fff",fontWeight:800,fontSize:12,cursor:"pointer"}}>SALVA</button><button onClick={()=>saveF(fanta.filter(x=>x.id!==p.id))} style={{background:"none",border:"none",cursor:"pointer"}}><Trash2 size={16} color={A.dim}/></button></div></div>)}</div>}
       {tab==="CLASSIFICHE"&&<div><div style={{display:"flex",gap:8,margin:"16px 0 14px"}}>{["PILOTI","COSTRUTTORI"].map(t=><button key={t} onClick={()=>setPT(t)} style={{background:t===pT?A.red:A.card,color:t===pT?"#fff":A.muted,border:"none",borderRadius:20,padding:"7px 16px",fontSize:11,fontWeight:800,cursor:"pointer"}}>{t}</button>)}</div><div style={{background:A.card,borderRadius:14,padding:12,marginBottom:14,display:"flex",gap:8,flexWrap:"wrap"}}><Inp ph="Nome" val={pf.name} chg={e=>setPf(p=>({...p,name:e.target.value}))} s={{flex:1,minWidth:120}}/>{pT==="PILOTI"&&<Inp ph="Team" val={pf.team} chg={e=>setPf(p=>({...p,team:e.target.value}))} s={{flex:1,minWidth:100}}/>}<button onClick={addPD} style={{background:A.red,border:"none",borderRadius:10,padding:"0 14px",color:"#fff",fontWeight:800,fontSize:12,cursor:"pointer"}}>AGGIUNGI</button></div>{pD.map(it=><div key={it.id} style={{background:A.card,borderRadius:12,padding:"12px 14px",marginBottom:8}}><div style={{marginBottom:8}}><span style={{fontWeight:700,fontSize:13,color:A.text}}>{it.name}</span>{it.team&&<span style={{fontSize:11,color:A.muted,marginLeft:8}}>{it.team}</span>}</div><div style={{display:"flex",gap:7,alignItems:"center"}}><input type="number" value={it.position} onChange={e=>setPD(d=>d.map(x=>x.id===it.id?{...x,position:parseInt(e.target.value)}:x))} style={{width:54,background:A.card2,border:`1px solid ${A.border}`,borderRadius:8,padding:"8px",color:A.text,fontSize:13,outline:"none",textAlign:"center"}}/><input type="number" value={it.points} onChange={e=>setPD(d=>d.map(x=>x.id===it.id?{...x,points:parseInt(e.target.value)}:x))} style={{flex:1,background:A.card2,border:`1px solid ${A.border}`,borderRadius:8,padding:"8px",color:A.text,fontSize:13,outline:"none"}}/><button onClick={async()=>await savePD(pD)} style={{background:A.red,border:"none",borderRadius:8,padding:"8px 12px",color:"#fff",fontWeight:800,fontSize:12,cursor:"pointer"}}>SALVA</button><button onClick={()=>savePD(pD.filter(x=>x.id!==it.id))} style={{background:"none",border:"none",cursor:"pointer"}}><Trash2 size={16} color={A.dim}/></button></div></div>)}</div>}
       {tab==="GARA LIVE"&&<div><div style={{color:A.red,fontWeight:900,fontStyle:"italic",fontSize:13,margin:"16px 0 12px"}}>GARE</div><div style={{background:A.card,borderRadius:14,padding:13,marginBottom:14,display:"flex",flexDirection:"column",gap:8}}><div style={{display:"flex",gap:8}}><Inp ph="Nome GP" val={gf.name} chg={e=>setGf(p=>({...p,name:e.target.value}))} s={{flex:1}}/><Inp ph="Circuito" val={gf.circuit} chg={e=>setGf(p=>({...p,circuit:e.target.value}))} s={{flex:1}}/></div><div style={{display:"flex",gap:8}}><Inp ph="Paese" val={gf.country} chg={e=>setGf(p=>({...p,country:e.target.value}))} s={{flex:1}}/><Inp ph="Round #" val={gf.round} chg={e=>setGf(p=>({...p,round:e.target.value}))} s={{flex:1}}/></div><input type="datetime-local" value={gf.date} onChange={e=>setGf(p=>({...p,date:e.target.value}))} style={{background:A.card,border:`1px solid ${A.border}`,borderRadius:10,padding:"11px 13px",color:A.text,fontSize:13,outline:"none",width:"100%"}}/><Btn ch="AGGIUNGI GARA" onClick={addR}/></div>{races.map(r=><div key={r.id} style={{background:A.card,borderRadius:12,padding:"13px 16px",marginBottom:10,display:"flex",alignItems:"center",justifyContent:"space-between"}}><div><div style={{fontWeight:700,fontSize:14,color:A.text}}>{r.name}</div><div style={{fontSize:11,color:A.muted}}>{r.circuit} · {r.date?new Date(r.date).toLocaleString("it-IT"):"-"}</div></div><div style={{display:"flex",gap:8,alignItems:"center"}}><select value={r.status} onChange={e=>saveR(races.map(x=>x.id===r.id?{...x,status:e.target.value}:x))} style={{background:r.status==="LIVE"?A.red:A.card2,border:`1px solid ${A.border}`,borderRadius:8,padding:"6px 10px",color:"#fff",fontSize:11,fontWeight:700,outline:"none",cursor:"pointer"}}>{["IN ARRIVO","LIVE","CONCLUSA"].map(s=><option key={s} style={{background:A.card,color:A.text}}>{s}</option>)}</select><button onClick={()=>saveR(races.filter(x=>x.id!==r.id))} style={{background:"none",border:"none",cursor:"pointer"}}><Trash2 size={16} color={A.dim}/></button></div></div>)}</div>}
